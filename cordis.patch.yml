@@ -1,0 +1,6 @@
+# dsh-memory bundle patch: register the memory plugin row.
+# The plugin module is this package itself (package.json main); the bare name
+# resolves from the profile's node_modules after `dsh plugin add`.
+- insert:
+    - id: dsh-memory
+      name: dsh-memory

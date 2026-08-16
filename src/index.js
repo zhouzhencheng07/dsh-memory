@@ -25,7 +25,12 @@
 //   - Dream: scheduled daily when dreamTime is set, plus the /dream command;
 //     consolidates memory -> dream/{personal,procedure,wiki}/<topic>.md with
 //     the session's own model, derived_from provenance, raw notes kept,
-//     fixed two-day window without a watermark.
+//     fixed two-day window FILTERED BY a source-level watermark catalog
+//     (dream/.catalog.json, {note rel: mtime}): only new/changed notes enter
+//     the LLM pipeline; successful batches are checkpointed, failed batches
+//     stay pending and are retried on the next run. Per-unit integrate:
+//     recall -> classify -> CREATE/CORROBORATE/REFINE/CORRECT + Related
+//     interlinks (QwenPaw-aligned, 2026-08-17).
 //   - config: `dsh-memory:` section in $DSH_HOME/settings.yaml, hot-reloaded
 //     (searchLimit / model / dreamTime / embeddingBaseUrl / embeddingModel /
 //     autoMemory), see README. dreamTime non-empty = Dream timer on;
@@ -121,8 +126,8 @@ function memoryDreamTool(ctx, getConfig) {
   return {
     name: 'memory_dream',
     description:
-      'Run one Dream consolidation: refine recent daily notes into dream/ with the session model, ' +
-      'keeping derived_from provenance and raw notes.',
+      'Run one Dream consolidation: refine changed daily notes into dream/ with the session model, ' +
+      'keeping derived_from provenance and raw notes (watermark skips unchanged notes).',
     parameters: {},
     output: {
       schema: { type: 'string' },
@@ -130,7 +135,7 @@ function memoryDreamTool(ctx, getConfig) {
     },
     async execute(_args, exec) {
       const agent = resolveAgent(ctx, exec)
-      const report = await runDream(ctx, agent, getConfig())
+      const report = await runDream(ctx, agent, getConfig(), getVectorIndex())
       return formatDreamReport(report)
     },
   }
@@ -221,8 +226,8 @@ export function apply(ctx) {
         if (dreamedToday === today) return
         if (timeStamp(now) !== runtime.dreamTime) return
         dreamedToday = today
-        runDream(ctx, undefined, runtime)
-          .then((report) => console.log(`dsh-memory dream: ${report.processedDates.length} date(s), ${report.written.length} digest(s), ${report.errors.length} error(s)`))
+        runDream(ctx, undefined, runtime, getVectorIndex())
+          .then((report) => console.log(`dsh-memory dream: ${report.processedDates.length} date(s), ${report.units} unit(s), ${report.written.length} digest(s), ${report.errors.length} error(s)`))
           .catch((error) => console.error(`dsh-memory dream failed: ${error?.message ?? String(error)}`))
       } catch (error) {
         console.error(`dsh-memory dream scheduler: ${error?.message ?? String(error)}`)
@@ -240,7 +245,7 @@ export function apply(ctx) {
         description: '立即执行一次 Dream 巩固：把 memory/ 每日记忆提炼进 dream/ 长期库',
         handler: async (inv) => {
           try {
-            const report = await runDream(ctx, inv.agent, runtime)
+            const report = await runDream(ctx, inv.agent, runtime, getVectorIndex())
             return { kind: 'success', text: formatDreamReport(report) }
           } catch (error) {
             return { kind: 'error', text: `Dream 执行失败：${error?.message ?? String(error)}` }

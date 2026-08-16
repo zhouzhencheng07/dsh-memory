@@ -45,9 +45,13 @@
 
 - **触发**：`dreamTime`（默认 23:00；非空 = 定时开，空 = 关）每日定时 + `/dream` 命令 + `memory_dream` 工具
 - **桶**：`personal`（偏好/约定/约束）、`procedure`（流程/方法）、`wiki`（知识/原则/先例/事实）
-- **窗口（固定两天，无水位）**：每次处理「今天 + 昨天」的全部笔记——每个文件有两次扫描机会；重复运行靠 `merge_with` 收敛（不产生重复节点）
-- **流程**：窗口内 `memory/` 笔记 → 当前会话模型整合进 `dream/<桶>/<主题>.md`：同主题 `merge_with` 融合（保留旧要点与全部来源）、新主题新建；文件尾写 `derived_from:: [[memory/...]]` 溯源；原始笔记永不删除
+- **窗口 + 水位（QwenPaw/ReMe 对齐）**：扫描「今天 + 昨天」；水位 catalog（`dream/.catalog.json`，`{笔记 rel: mtime}`）只放行**新增/变更**的笔记——无变更直接跳过（不耗 LLM）；成功文件写水位、失败文件不写（下次自动重试）；改过的笔记自动重扫
+- **流程（逐文件顺序执行）**：每个变更笔记文件单独走 `extract`（1 次 LLM 调用 → 记忆单元 units，宁缺毋滥闸口，≤5 个；跨文件同抽象合并发生在 integrate 层）→ `recall`（确定性召回：IDF 加权子串 + 首行加分，配置向量后与向量 RRF 融合——等价 node_search 的 BM25+向量混合，top 8 候选全量正文）→ `integrate`（每 unit：分类 same_abstraction/related/unrelated → 恰好一个动作 **CREATE / CORROBORATE / REFINE / CORRECT**，输出最终完整正文；每 unit 前刷新 digest 快照，同一运行中前面的 digest 对后续可见）→ 系统写盘进 `dream/<桶>/<主题>.md`
+- **LLM 调用控制**：**不传 maxTokens**——使用模型本身输出上限（dsh-llm 自动填 adapter 默认，deepseek 256k，与正常 agent 回合一致）；`reasoningEffort` 跟随会话；单次调用 30 分钟超时兜底；失败重试一次（附严格 JSON 提醒），失败报告带模型回答片段
+- **正文结构**：首行 `# 一句话标题`（与 memory 笔记的 `# 主题` 对齐，也让 Dream 召回的首行加权命中真实标题）+ `##` 小节（procedure: Trigger/Steps/Pre-conditions/Failure modes；personal: Rule/Why/How to apply；wiki: 定义/原则/事实）；不引入更深层级
+- **互链与溯源**：文件尾 `Related: [[dream/...]] — 关系说明` 行（系统维护，只增不删、按 rel 去重）+ `derived_from:: [[memory/...]]` 溯源；原始笔记永不删除；UPDATE 保留旧要点与全部来源
 - **质量 gate**：宁缺毋滥——只提炼可长期复用的抽象（禁止 passing mention/已知概念复述/事件总括/一次性时间戳）；不进 digest 的笔记仍被 `memory_search` 全库检索
+- **语言**：不强制——digest 语言跟随源笔记/会话模型（同 QwenPaw）
 
 ## 向量检索（可选）
 

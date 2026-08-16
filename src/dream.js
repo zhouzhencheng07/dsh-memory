@@ -1,45 +1,108 @@
 // dsh-memory — Dream: consolidate daily memory notes into the long-term
 // refined library (dream/<bucket>/<topic>.md).
 //
-// Pipeline (fixed window per pass — NO watermark):
-//   1. extract: collect the notes of TODAY and YESTERDAY (a note file gets
-//      two scan chances: the day it was written and the next day);
-//   2. integrate: the session LLM reads the existing digest catalog + the
-//      notes, decides bucket/topic and merge-vs-create, and returns strict
-//      JSON; the plugin validates and writes atomically;
-//   3. evolution: a merge_with target is fused through a SECOND LLM pass over
-//      the old digest text (keep old points, weave in new evidence), and ALL
-//      old derived_from provenance is preserved — no blind overwrite;
-//   4. provenance: every digest file ends with `derived_from:: [[memory/…]]`
-//      lines; raw notes are NEVER deleted.
+// Pipeline (per-file sequential, user decisions 2026-08-17):
+//   1. collect: scan the notes of TODAY and YESTERDAY (a note file gets two
+//      window chances: the day it was written and the next day);
+//   2. watermark: a source-level catalog (dream/.catalog.json, {note rel:
+//      mtime}) filters out notes already processed unchanged — only notes
+//      that are new or whose mtime changed enter the LLM pipeline. A file is
+//      checkpointed only when its units all integrated successfully; failed
+//      files stay un-checkpointed and are retried on the next run. No LLM
+//      call when nothing changed.
+//   3. PER-FILE execution: for each changed note file (sorted by rel), one
+//      extract call turns that file's content into memory UNITS
+//      ({name, bucket, summary, paths}) — the "not worth memorizing" gate
+//      (宁缺毋滥, max 5 units). Cross-file merging of the same abstraction
+//      happens at the INTEGRATE layer (a later file's unit recalls the
+//      earlier file's digest -> CORROBORATE/REFINE), not in extract.
+//   4. recall: for each unit, a DETERMINISTIC scan over the existing digests
+//      returns up to RECALL_LIMIT candidate nodes (dedup + interlink input):
+//      IDF-lite weighted term matching (title line bonus), fused with vector
+//      hits via RRF when a vector index is configured — the local analogue
+//      of ReMe's node_search (BM25 + vector RRF). The digest snapshot is
+//      refreshed per unit, so digests written earlier in the same run are
+//      visible to later files/units (interlinks grow within one run).
+//   5. integrate: per unit, one LLM call classifies the candidates
+//      (same_abstraction / related / unrelated), picks exactly one action —
+//      CREATE / CORROBORATE / REFINE / CORRECT — and returns the FINAL full
+//      digest body. The plugin validates, hardens the path, appends
+//      `Related:` interlinks and `derived_from::` provenance, and writes
+//      atomically. UPDATE keeps ALL old provenance and Related links
+//      (additive only). Bare [[...]] lines and derived_from lines are
+//      stripped from LLM content (provenance is system-maintained).
+//   6. provenance: raw notes are NEVER deleted; digest is a refinement
+//      layer, not a gate — notes that never make it into dream/ remain fully
+//      searchable through memory_search.
 //
-// No watermark by design (user decision 2026-08-17): re-running the same
-// window converges through merge_with (no duplicate nodes), failed batches
-// simply get their second chance the next day, and notes that never make it
-// into dream/ remain fully searchable through memory_search — digest is a
-// refinement layer, not a gate.
+// LLM call controls (user decisions 2026-08-17):
+//   - NO maxTokens: the request omits the field, so the dsh llm service
+//     materializes the adapter's defaultMaxTokens (deepseek: 256k) — the
+//     model's own output ceiling, identical to normal agent turns. A
+//     hard-coded cap (was 8192) covers thinking + answer and starved the
+//     JSON answer on reasoning-max sessions ("no JSON object in the answer").
+//   - reasoningEffort follows the acting session (quality matters).
+//   - one LLM call is bounded by DREAM_TIMEOUT_MS (30 min) as a safety net.
+//   - failed calls retry once with a strict-JSON reminder appended; failure
+//     reports include the model's raw answer snippet for diagnosis.
+//
+// Language: NO output-language requirement (user decision 2026-08-17, like
+// QwenPaw): digest language follows the source material / the session model.
 //
 // The LLM is the acting session's model (quality matters; the user's
 // decision 2026-08-15): provider/model/reasoning come from the session
 // request header, falling back to agentDefaultModel.
 
 import {
+  existsSync,
   mkdirSync,
+  readFileSync,
   renameSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import { join, relative } from 'node:path'
-import { digestRoot, readMemoryFile, safeTopic, todayStamp, walkMemory } from './store.js'
+import {
+  digestRoot,
+  memoryRoot,
+  readMemoryFile,
+  safeTopic,
+  todayStamp,
+  walkMemory,
+} from './store.js'
+import { fuseHits, occurrenceCount } from './search.js'
 
 /** Digest buckets (QwenPaw-aligned, user decision 2026-08-16). */
 export const BUCKETS = ['personal', 'procedure', 'wiki']
 
-/** Max note-batch characters per LLM call. */
-const BATCH_CHARS = 8000
-/** Max output tokens for one integration call. */
-const DREAM_MAX_TOKENS = 8192
-/** Hard safety timeout for one LLM call. */
-const DREAM_TIMEOUT_MS = 10 * 60 * 1000
+/** Max units per extract call (ReMe uses the same cap). */
+const MAX_UNITS = 5
+/**
+ * Max candidates surfaced to one integrate call. Higher than ReMe's 20-30
+ * would cost too much context per call; 8 is the sweet spot for a single
+ * agent that works across many domains (user decision 2026-08-17).
+ */
+const RECALL_LIMIT = 8
+/** Max chars of one candidate digest inside an integrate prompt. */
+const CANDIDATE_CHARS = 1400
+/**
+ * Hard safety timeout for ONE LLM call (user decision 2026-08-17: "超时可以
+ * 长一些"): with the output cap removed, a reasoning model on a large prompt
+ * can legitimately stream for well over ten minutes. 30 minutes is still a
+ * bound against a hung call, far beyond any normal JSON task.
+ */
+const DREAM_TIMEOUT_MS = 30 * 60 * 1000
+/** Strict-JSON reminder appended on retry attempts. */
+const STRICT_JSON_REMINDER =
+  '（重试提醒：只输出严格 JSON 对象，不要任何解释文字、不要 markdown 围栏、不要以"好的/以下是"等开头，直接输出 JSON。）'
+/** Dream watermark file (source-level catalog) inside the digest root. */
+const CATALOG_FILE = '.catalog.json'
+
+/** Truncated model answer for failure diagnostics ('' when empty). */
+function answerSnippet(answer) {
+  const text = String(answer ?? '').trim()
+  return text ? `; 回答片段: ${JSON.stringify(text.slice(0, 200))}` : ''
+}
 
 /** Atomic write of a digest file. */
 function writeDigest(file, content) {
@@ -59,6 +122,26 @@ export function stripDerivedFrom(text) {
     .trimEnd()
 }
 
+/**
+ * Clean an LLM-produced digest body: drop system-maintained lines
+ * (derived_from::, Related:, bare wikilink lines) and collapse blank runs.
+ */
+export function cleanDigestBody(text) {
+  return String(text)
+    .split('\n')
+    .filter((line) => {
+      const t = line.trim()
+      if (t.startsWith('derived_from::')) return false
+      if (/^Related:/.test(t)) return false
+      if (/^\[\[.*\]\]$/.test(t)) return false
+      if (/^-\s*\[\[.*\]\]/.test(t)) return false
+      return true
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
 /** Parse strict JSON from an LLM answer (tolerates ```json fences). */
 export function parseJsonAnswer(text) {
   const cleaned = String(text)
@@ -73,14 +156,18 @@ export function parseJsonAnswer(text) {
 
 /**
  * Call the acting session's LLM and return the full text.
+ *
+ * NO maxTokens is sent: the dsh llm service materializes the adapter's
+ * defaultMaxTokens for the model (deepseek: 256k), i.e. the model's own
+ * output ceiling — the same behavior as normal agent turns (user decision
+ * 2026-08-17: use the model's max, no user config).
  * @param {object} ctx - Cordis context
  * @param {object} agent - acting agent (may be undefined for scheduled runs)
  * @param {Array<{role: string, content: unknown}>} messages
- * @param {number} maxTokens
  * @param {{model?: string}} [options] - optional "provider/model" override
  * @returns {Promise<string>}
  */
-export async function callSessionLlm(ctx, agent, messages, maxTokens, options = {}) {
+export async function callSessionLlm(ctx, agent, messages, options = {}) {
   const llm = ctx.get('llm')
   if (llm === undefined) throw new Error('dsh-memory: llm service absent')
   let provider
@@ -121,7 +208,6 @@ export async function callSessionLlm(ctx, agent, messages, maxTokens, options = 
     provider,
     model,
     messages,
-    ...(Number.isInteger(maxTokens) ? { maxTokens } : {}),
     ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
   }
   const controller = new AbortController()
@@ -137,27 +223,56 @@ export async function callSessionLlm(ctx, agent, messages, maxTokens, options = 
   }
 }
 
-/** Build the catalog of existing digests (rel + first heading line). */
-export function digestCatalog() {
-  const out = []
-  for (const entry of walkMemory()) {
-    if (entry.kind !== 'digest') continue
-    const first = entry.text
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0)[0]
-    out.push(`${entry.rel}: ${first ? first.slice(0, 120) : ''}`)
-  }
-  return out
+// ---------------------------------------------------------------------------
+// Watermark (source-level catalog)
+// ---------------------------------------------------------------------------
+
+function catalogPath() {
+  return join(digestRoot(), CATALOG_FILE)
 }
+
+/** Load the Dream watermark: {note rel -> mtime ms}. Corrupt/absent -> {}. */
+export function loadCatalog() {
+  try {
+    const parsed = JSON.parse(readFileSync(catalogPath(), 'utf8'))
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function saveCatalog(catalog) {
+  const file = catalogPath()
+  mkdirSync(join(file, '..'), { recursive: true })
+  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`
+  writeFileSync(tmp, JSON.stringify(catalog, null, 1), 'utf8')
+  renameSync(tmp, file)
+}
+
+/** Current mtime (ms) of a note file under memoryRoot(), null when absent. */
+function noteMtime(rel) {
+  try {
+    return statSync(join(memoryRoot(), rel)).mtimeMs
+  } catch {
+    return null
+  }
+}
+
+/** Drop catalog entries whose date is outside the window or whose file is gone. */
+function pruneCatalog(catalog) {
+  const yesterday = todayStamp(new Date(Date.now() - 24 * 60 * 60 * 1000))
+  for (const rel of Object.keys(catalog)) {
+    const m = /^(\d{4}-\d{2}-\d{2})\//.exec(rel)
+    if ((m && m[1] < yesterday) || noteMtime(rel) === null) delete catalog[rel]
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Window collection
+// ---------------------------------------------------------------------------
 
 /**
  * Group the notes of TODAY and YESTERDAY for one Dream pass.
- *
- * Fixed two-day window, NO watermark (user decision 2026-08-17): each note
- * file gets two scan chances (the day it was written and the next day);
- * re-running the window converges through merge_with instead of duplicating
- * nodes, so repeated manual runs add no noise.
  * @returns {Array<{date: string, files: Array<{rel: string, text: string}>}>}
  */
 export function collectWindow() {
@@ -176,55 +291,144 @@ export function collectWindow() {
     .map(([date, files]) => ({ date, files }))
 }
 
-/**
- * Split a date's files into batches bounded by BATCH_CHARS.
- * @param {Array<{rel: string, text: string}>} files
- * @returns {Array<Array<{rel: string, text: string}>>}
- */
-export function splitBatches(files) {
-  const batches = []
-  let current = []
-  let size = 0
-  for (const file of files) {
-    const add = file.text.length + file.rel.length + 8
-    if (current.length > 0 && size + add > BATCH_CHARS) {
-      batches.push(current)
-      current = []
-      size = 0
-    }
-    current.push(file)
-    size += add
-  }
-  if (current.length > 0) batches.push(current)
-  return batches
-}
+// ---------------------------------------------------------------------------
+// Extract phase: ONE note file -> memory units
+// ---------------------------------------------------------------------------
 
-/** Build the LLM prompt for one batch (notes already bounded). */
-export function buildBatchPrompt(catalog, date, files) {
-  const notes = files
-    .map((f) => `=== ${f.rel} ===\n${f.text}`)
-    .join('\n\n')
+/** Build the LLM prompt for ONE note file. */
+export function buildExtractPrompt(date, file) {
   return [
-    '你是记忆巩固引擎。把「新记忆笔记」整合进长期精炼库 dream/（按知识类型分桶）。',
+    '你是记忆巩固引擎。阅读「新记忆笔记」，抽取可整合进长期精炼库 dream/ 的记忆单元（unit）。后续步骤会单独决定每个 unit 是新建 digest 还是并入已有 digest。',
     `桶（bucket）只能是：${BUCKETS.join(' / ')}。`,
     '桶的选择按「未来读者会从哪里搜索」决定：用户/团队/项目偏好、约定与约束 → personal；怎么做某事 → procedure；通用知识、原则、作为先例的决策、事实、观察 → wiki。',
-    'procedure 用 Trigger/Steps/Pre-conditions/Failure modes 结构；personal 用 Rule/Why/How to apply；wiki 用简洁知识条目（定义/原则/事实/观察）。',
+    '一个 unit = 一个可复用抽象，未来会在同一场景被召回。跨文件表达同一抽象的情况不需要在此合并（整合阶段会自动并入已有 digest）。',
     'digest 是抽象记忆层：只保存未来 agent 应该回忆的可复用原则、模式、流程、约定、偏好。原始细节留在 memory/ 每日笔记中；**不进入 digest 的笔记不会丢失**——它们仍可被 memory_search 直接检索到。',
     '禁止输出：一带而过的提及、已知概念复述、事件总括、一次性时间戳、没有复用价值的事实。',
-    '已有 digest 清单（rel 路径 + 首行）：',
-    catalog.length > 0 ? catalog.map((l) => `- ${l}`).join('\n') : '（无）',
-    '',
-    `待整合的新记忆笔记（日期 ${date}）：`,
-    notes,
+    `待抽取的新记忆笔记（日期 ${date}）：`,
+    `=== ${file.rel} ===\n${file.text}`,
     '',
     '要求：',
     '1. 输出严格 JSON（不要任何其他文字，不要 markdown 围栏）：',
-    '{"digests":[{"bucket":"<桶>","topic":"<短英文主题名>","title":"<一句话标题>","content":"<digest 正文 Markdown>","merge_with":"<已有 digest 的 rel 路径，同主题整合时填，否则 null>","derived_from":["<本次用到的源笔记 rel>"]}]}',
-    '2. 宁缺毋滥：只提取可长期复用的抽象知识；如果这批笔记没有可复用的内容，返回空数组 "digests":[]。',
-    '3. 聚合：多条笔记表达同一个抽象时必须合并成一个 digest（derived_from 可包含多个来源），不要逐条生成摘要。',
-    '4. 同主题演化：与已有 digest 同主题（内容实质相同）时 merge_with 指向它，整合进旧文件，绝不新建重复节点；新主题 merge_with 为 null。',
-    '5. content 要命名抽象、解释为什么重要、指向证据，不要逐句摘抄笔记；正文简洁抽象，通常 50-200 词。',
-    '6. topic 用 kebab-case 英文/拼音，避免与已有文件名冲突。',
+    '{"units":[{"name":"<短名，标识该抽象>","bucket":"<桶>","summary":"<基于证据的抽象摘要：命名抽象 + 解释为什么重要 + 指向证据，50-120 词>","paths":["<源笔记 rel>"]}]}',
+    `2. units 最多 ${MAX_UNITS} 个；每个 unit 的 paths 只能填写本文件 rel：${file.rel}。`,
+    '3. 宁缺毋滥：如果这份笔记没有可复用的内容，返回 "units":[]。',
+  ].join('\n')
+}
+
+// ---------------------------------------------------------------------------
+// Recall phase: deterministic candidate retrieval over existing digests
+// ---------------------------------------------------------------------------
+
+/** First non-empty line of a digest (its de-facto title line). */
+function titleLine(text) {
+  const line = String(text ?? '').split('\n').map((l) => l.trim()).find((l) => l.length > 0)
+  return line ?? ''
+}
+
+/**
+ * Deterministic recall over digest entries (local analogue of ReMe's
+ * node_search). Scoring mirrors BM25's spirit without the machinery:
+ * - each unit term (from name+summary) contributes an IDF-lite weight
+ *   log(1 + N/(1+df)) — rare, discriminative terms outweigh generic ones;
+ * - a term hitting the digest's title line (first non-empty line) adds a
+ *   bonus, the local analogue of searching frontmatter name/description;
+ * - when a vector index is available, the top substring hits are fused
+ *   with vector hits through the same RRF used by memory_search.
+ * @param {Array<{rel: string, date: string, kind: string, text: string}>} entries - digest entries
+ * @param {{name?: string, summary?: string}} unit
+ * @param {{limit?: number, vectorIndex?: object|null}} [opts]
+ * @returns {Promise<Array<{rel: string, date: string, kind: string, score: number, snippet: string}>>}
+ */
+export async function recallDigests(entries, unit, opts = {}) {
+  const limit = opts.limit ?? RECALL_LIMIT
+  const blob = `${unit?.name ?? ''} ${unit?.summary ?? ''}`
+  const terms = [...new Set(blob.split(/[^\p{L}\p{N}]+/u).filter((t) => t.length >= 2))].slice(0, 12)
+  if (terms.length === 0) return []
+  const N = entries.length || 1
+  const df = new Map()
+  for (const e of entries) {
+    for (const t of terms) {
+      if (occurrenceCount(e.text, t) > 0) df.set(t, (df.get(t) ?? 0) + 1)
+    }
+  }
+  const weight = (t) => Math.log(1 + N / (1 + (df.get(t) ?? 0)))
+  const scored = []
+  for (const e of entries) {
+    const title = titleLine(e.text).toLocaleLowerCase()
+    let score = 0
+    for (const t of terms) {
+      if (occurrenceCount(e.text, t) === 0) continue
+      score += weight(t) + (title.includes(t.toLocaleLowerCase()) ? 1.5 : 0)
+    }
+    if (score === 0) continue
+    scored.push({
+      rel: e.rel,
+      date: e.date ?? '',
+      kind: e.kind ?? 'digest',
+      score,
+      snippet: titleLine(e.text),
+    })
+  }
+  scored.sort((a, b) => b.score - a.score || a.rel.localeCompare(b.rel))
+  const sub = scored.slice(0, limit * 2)
+  const vectorIndex = opts?.vectorIndex ?? null
+  if (vectorIndex !== null) {
+    try {
+      const vec = await vectorIndex.query(entries, blob, limit * 3)
+      return fuseHits(sub, vec, limit)
+    } catch {
+      // vector recall is best-effort: a broken embedding service falls back
+      // to pure substring results
+    }
+  }
+  return sub.slice(0, limit)
+}
+
+// ---------------------------------------------------------------------------
+// Integrate phase: one unit -> one digest node decision
+// ---------------------------------------------------------------------------
+
+const truncate = (s, n) => (s.length <= n ? s : `${s.slice(0, n)}…`)
+
+/** Build the per-unit integrate prompt (candidates + classification + action). */
+export function buildIntegratePrompt(unit, bucket, sources, evidence, candidates, sameBucket) {
+  const candText = candidates.length > 0
+    ? candidates.map((c) => `- ${c.rel}\n${truncate(c.text, CANDIDATE_CHARS)}`).join('\n\n')
+    : '（无）'
+  const bucketTopics = sameBucket.length > 0
+    ? sameBucket.map((r) => `- ${r}`).join('\n')
+    : '（无）'
+  return [
+    '你是记忆巩固引擎。把一个「记忆单元」整合进长期精炼库 dream/。',
+    `桶：${bucket}。`,
+    '正文结构约定：**content 第一行必须是 `# <一句话标题>`**（简短、与该抽象对应），然后才是 `##` 小节；procedure 用 Trigger/Steps/Pre-conditions/Failure modes；personal 用 Rule/Why/How to apply；wiki 用简洁知识条目（定义/原则/事实/观察）。UPDATE 动作保留原 `#` 标题（仅当标题已不准确时修正）。',
+    'digest 是抽象记忆层：正文简洁抽象（通常 50-200 词），不逐句摘抄笔记；细节留在 memory/。',
+    '',
+    '# 待整合单元',
+    `name: ${unit.name}`,
+    `summary: ${unit.summary}`,
+    `sources: ${sources.join(', ')}`,
+    '',
+    '# 证据（来自每日笔记）',
+    evidence,
+    '',
+    '# 候选已有 digest（召回，用于去重与互链）',
+    candText,
+    '',
+    '# 同桶已有 digest（CREATE 的 topic 冲突检查）',
+    bucketTopics,
+    '',
+    '要求：',
+    '1. 分类候选：same_abstraction（触发条件相同、内容实质重叠）→ 最多选一个作为更新目标；related（相邻/互补，值得互链）→ 选入 related；其余 unrelated 忽略。',
+    '2. 选择且只选择一个动作：',
+    '   - CREATE：没有 same_abstraction。topic 用英文 kebab-case；若理想 topic 与同桶已有文件名冲突，说明它其实是同抽象 → 改选 REFINE/CORRECT。',
+    '   - CORROBORATE：同一抽象再次出现且无实质新信息 → target 指向它，content 输出其完整正文（可微调措辞）。',
+    '   - REFINE：有新细节/前置条件/边界/失败模式/例外 → 融合进对应段落，content 输出整合后的完整正文，target 指向它。',
+    '   - CORRECT：与新证据冲突或已过时 → 收紧/修正表述，content 输出修正后的完整正文，target 指向它。',
+    '3. content 是最终完整 digest 正文（保持桶的结构风格）。不要写 derived_from 行、不要写 Related 行、不要输出裸 [[...]] 链接行——来源与互链由系统维护。',
+    '4. 输出严格 JSON（不要任何其他文字，不要 markdown 围栏）：',
+    '{"action":"CREATE|CORROBORATE|REFINE|CORRECT","target":"<UPDATE 时的候选 rel 路径；CREATE 为 null>","topic":"<CREATE 时的主题名>","content":"<完整 digest 正文 Markdown>","related":[{"rel":"<候选 rel>","note":"<一句话关系说明>"}]}',
+    '5. related 只能从候选列表选，最多 3 条，note 用一句话说明与本文的关系。',
   ].join('\n')
 }
 
@@ -253,138 +457,318 @@ export function buildMergePrompt(oldText, newContent, sources) {
   ].join('\n')
 }
 
-/** Extract the `derived_from:: [[...]]` lines of a digest file. */
+/**
+ * Extract the `derived_from:: [[...]]` lines of a digest file, returned as
+ * FULL lines (prefix included) so an UPDATE can re-emit old provenance
+ * verbatim. (Regression 0.1.1: returning only `m[1]` dropped the prefix and
+ * wrote bare `[[...]]` lines into updated digests.)
+ */
 export function listDerivedFrom(text) {
   const out = []
   for (const line of String(text ?? '').split('\n')) {
     const m = /^\s*derived_from::\s+(.+)$/.exec(line)
-    if (m) out.push(m[1].trim())
+    if (m) out.push(m[0].trim())
   }
   return out
+}
+
+/** Parse a `Related: [[rel]] — note; [[rel]] — note` line into items. */
+export function parseRelated(text) {
+  const out = []
+  for (const line of String(text ?? '').split('\n')) {
+    const m = /^Related:\s*(.*)$/.exec(line.trim())
+    if (!m) continue
+    for (const part of m[1].split(';')) {
+      const mm = /\[\[([^\]]+)\]\]\s*(?:—|-)?\s*(.*)$/.exec(part.trim())
+      if (mm) out.push({ rel: mm[1], note: mm[2].trim() })
+    }
+  }
+  return out
+}
+
+/** Render Related items as one line; dedupes by rel; empty -> ''. */
+export function renderRelated(items) {
+  const seen = new Set()
+  const parts = []
+  for (const it of items || []) {
+    const rel = String(it?.rel ?? '').trim()
+    if (!rel || seen.has(rel)) continue
+    seen.add(rel)
+    const note = String(it?.note ?? '').trim()
+    parts.push(note ? `[[${rel}]] — ${note}` : `[[${rel}]]`)
+  }
+  return parts.length > 0 ? `Related: ${parts.join('; ')}` : ''
 }
 
 /** Read an existing digest by rel path (dream/<bucket>/<topic>.md). */
 function readDigest(rel) {
   const clean = String(rel ?? '').replace(/^dream\//, '')
+  if (!clean || clean.includes('..') || clean.startsWith('/') || clean.includes('\\')) return null
   if (!clean.includes('/') || !clean.endsWith('.md')) return null
   const text = readMemoryFile(join(digestRoot(), clean))
   return text === null ? null : { rel: `dream/${clean}`, text }
 }
 
 /**
- * Run one Dream pass over the fixed two-day window (today + yesterday).
- * No watermark: re-running converges through merge_with; failed batches get
- * their second chance on the next day's window.
+ * Integrate ONE unit: recall candidates, classify, act, and return the
+ * final write plan. Throws on failure (the caller leaves the source note
+ * file un-checkpointed so the next run retries).
+ * @returns {Promise<{rel: string, action: string, relatedCount: number}>}
+ */
+async function integrateUnit(ctx, agent, unit, file, digestEntries, config, vectorIndex) {
+  const sources = Array.isArray(unit.paths)
+    ? unit.paths.filter((p) => typeof p === 'string' && p === file.rel)
+    : []
+  if (sources.length === 0) throw new Error('unit has no valid sources')
+  const bucket = BUCKETS.includes(unit.bucket) ? unit.bucket : 'wiki'
+  const evidence = `=== ${file.rel} ===\n${file.text}`
+
+  const hits = await recallDigests(digestEntries, unit, { vectorIndex })
+  const entryByRel = new Map(digestEntries.map((e) => [e.rel, e]))
+  const candidates = hits.map((h) => ({ rel: h.rel, text: entryByRel.get(h.rel)?.text ?? '' }))
+  const sameBucket = digestEntries
+    .filter((e) => e.rel.startsWith(`dream/${bucket}/`))
+    .map((e) => e.rel)
+
+  let parsed = null
+  let lastError = null
+  let lastAnswer = ''
+  for (let attempt = 0; attempt < 2 && parsed === null; attempt++) {
+    try {
+      const prompt = buildIntegratePrompt(unit, bucket, sources, evidence, candidates, sameBucket)
+        + (attempt > 0 ? `\n${STRICT_JSON_REMINDER}` : '')
+      const answer = await callSessionLlm(ctx, agent, [
+        { role: 'user', content: [{ type: 'text', text: prompt }] },
+      ], { model: config?.model })
+      lastAnswer = answer
+      parsed = parseJsonAnswer(answer)
+      if (!['CREATE', 'CORROBORATE', 'REFINE', 'CORRECT'].includes(parsed.action)) {
+        throw new Error(`bad action: ${parsed.action}`)
+      }
+      if (typeof parsed.content !== 'string' || parsed.content.trim().length === 0) {
+        throw new Error('empty content')
+      }
+    } catch (error) {
+      lastError = error
+    }
+  }
+  if (parsed === null) {
+    throw new Error(`integrate LLM failed: ${lastError?.message ?? String(lastError)}${answerSnippet(lastAnswer)}`)
+  }
+
+  const body = cleanDigestBody(parsed.content)
+  if (body.length === 0) throw new Error('integrate returned empty body')
+  const related = (Array.isArray(parsed.related) ? parsed.related : [])
+    .filter((r) => r && typeof r.rel === 'string' && typeof r.note === 'string' && candidates.some((c) => c.rel === r.rel))
+    .slice(0, 3)
+  const newProvenance = sources.map((s) => `derived_from:: [[${s}]]`)
+
+  // Resolve the write target: UPDATE needs a real existing digest; a missing
+  // or colliding target degrades to CREATE, and a CREATE topic that already
+  // exists degrades to a REFINE-style merge (never overwrite, never stall).
+  let action = parsed.action
+  let oldDigest = null
+  let target = null
+  if (action === 'CREATE') {
+    target = `dream/${bucket}/${safeTopic(parsed.topic || unit.name)}.md`
+    const existing = readDigest(target)
+    if (existing !== null) {
+      action = 'REFINE'
+      oldDigest = existing
+    }
+  } else {
+    const t = String(parsed.target ?? '').trim()
+    if (t && t.includes('/')) oldDigest = readDigest(t)
+    if (oldDigest === null) {
+      action = 'CREATE'
+      target = `dream/${bucket}/${safeTopic(parsed.topic || unit.name)}.md`
+      const existing = readDigest(target)
+      if (existing !== null) {
+        action = 'REFINE'
+        oldDigest = existing
+      }
+    } else {
+      target = oldDigest.rel
+    }
+  }
+
+  let finalBody = body
+  let provenance = newProvenance
+  let relatedItems = related
+  if (oldDigest !== null) {
+    provenance = [...new Set([...listDerivedFrom(oldDigest.text), ...newProvenance])]
+    relatedItems = [...parseRelated(oldDigest.text), ...related]
+    if (parsed.action === 'CREATE') {
+      // topic collision fallback: fuse the unit into the existing file
+      let merged = null
+      let mergeError = null
+      let mergeAnswer = ''
+      for (let attempt = 0; attempt < 2 && merged === null; attempt++) {
+        try {
+          const prompt = buildMergePrompt(oldDigest.text, unit.summary, sources)
+            + (attempt > 0 ? `\n${STRICT_JSON_REMINDER}` : '')
+          const answer = await callSessionLlm(ctx, agent, [
+            { role: 'user', content: [{ type: 'text', text: prompt }] },
+          ], { model: config?.model })
+          mergeAnswer = answer
+          merged = cleanDigestBody(String(answer))
+        } catch (error) {
+          mergeError = error
+        }
+      }
+      if (merged === null || merged.length === 0) {
+        throw new Error(`collision merge failed: ${mergeError?.message ?? String(mergeError)}${answerSnippet(mergeAnswer)}`)
+      }
+      finalBody = merged
+    }
+  }
+
+  const relatedLine = renderRelated(relatedItems)
+  const content = [finalBody, relatedLine, ...provenance].filter(Boolean).join('\n')
+  writeDigest(join(digestRoot(), target.replace(/^dream\//, '')), `${content}\n`)
+  return { rel: target, action, relatedCount: relatedItems.length }
+}
+
+/**
+ * Run one Dream pass over the fixed two-day window (today + yesterday),
+ * filtered by the source-level watermark catalog, executing ONE FILE at a
+ * time (extract -> per-unit recall+integrate) so earlier files' digests are
+ * visible to later files within the same run.
  * @param {object} ctx - Cordis context
  * @param {object} agent - acting agent (may be undefined)
  * @param {object} [config] - plugin config (model override etc.)
- * @returns {Promise<{processedDates: string[], written: string[], errors: string[]}>}
+ * @param {object|null} [vectorIndex] - optional VectorIndex for hybrid recall
+ * @returns {Promise<{processedDates: string[], scanned: number, changed: number, unchanged: number, units: number, written: string[], changes: string[], errors: string[], skipped: boolean}>}
  */
-export async function runDream(ctx, agent, config) {
-  const pending = collectWindow()
+export async function runDream(ctx, agent, config, vectorIndex = null) {
+  const catalog = loadCatalog()
+  const window = collectWindow()
+  const pending = []
+  let scanned = 0
+  let unchanged = 0
+  for (const { date, files } of window) {
+    const changed = []
+    for (const f of files) {
+      scanned += 1
+      const mt = noteMtime(f.rel)
+      if (mt !== null && catalog[f.rel] === mt) {
+        unchanged += 1
+        continue
+      }
+      changed.push(f)
+    }
+    if (changed.length > 0) pending.push({ date, files: changed.sort((a, b) => a.rel.localeCompare(b.rel)) })
+  }
+  const processedDates = window.map(({ date }) => date)
   const written = []
+  const changes = []
   const errors = []
-  const processedDates = pending.map(({ date }) => date)
-  const catalog = digestCatalog()
 
+  if (pending.length === 0) {
+    pruneCatalog(catalog)
+    saveCatalog(catalog)
+    return {
+      processedDates,
+      scanned,
+      changed: 0,
+      unchanged,
+      units: 0,
+      written,
+      changes,
+      errors,
+      skipped: true,
+    }
+  }
+
+  let unitsCount = 0
   for (const { date, files } of pending) {
-    const batches = splitBatches(files)
-    for (const batch of batches) {
-      // the session model is a reasoning chat model: strict-JSON output from
-      // a cold call fails occasionally, so retry the whole call+parse once
-      let parsed = null
+    for (const file of files) {
+      // extract: one file -> units (retry once; a failed file is NOT
+      // checkpointed and gets its chance again on the next run)
+      let unitResult = null
       let lastError = null
-      for (let attempt = 0; attempt < 2 && parsed === null; attempt++) {
+      let lastAnswer = ''
+      for (let attempt = 0; attempt < 2 && unitResult === null; attempt++) {
         try {
+          const prompt = buildExtractPrompt(date, file)
+            + (attempt > 0 ? `\n${STRICT_JSON_REMINDER}` : '')
           const answer = await callSessionLlm(ctx, agent, [
-            { role: 'user', content: [{ type: 'text', text: buildBatchPrompt(catalog, date, batch) }] },
-          ], DREAM_MAX_TOKENS, { model: config?.model })
-          parsed = parseJsonAnswer(answer)
-          if (!Array.isArray(parsed.digests)) {
-            lastError = new Error('answer JSON has no digests array')
-            parsed = null
-          }
+            { role: 'user', content: [{ type: 'text', text: prompt }] },
+          ], { model: config?.model })
+          lastAnswer = answer
+          const parsed = parseJsonAnswer(answer)
+          if (!Array.isArray(parsed.units)) throw new Error('answer JSON has no units array')
+          unitResult = parsed
         } catch (error) {
           lastError = error
         }
       }
-      if (parsed === null) {
-        errors.push(`batch failed (${date}): ${lastError?.message ?? String(lastError)}`)
+      if (unitResult === null) {
+        errors.push(`extract failed (${date}, ${file.rel}): ${lastError?.message ?? String(lastError)}${answerSnippet(lastAnswer)}`)
         continue
       }
-      try {
-        const digests = parsed.digests
-        for (const d of digests) {
-          try {
-            if (!d || typeof d.content !== 'string' || d.content.trim().length === 0) continue
-            const bucket = BUCKETS.includes(d.bucket) ? d.bucket : 'wiki'
-            const topic = safeTopic(d.topic || 'untitled')
-            const sources = Array.isArray(d.derived_from)
-              ? d.derived_from.filter((s) => typeof s === 'string')
-              : []
-            const newProvenance = sources.map((s) => `derived_from:: [[${s.replace(/^dream\//, 'memory/')}]]`)
 
-            // merge_with: fuse into the existing digest (second LLM pass over
-            // the old content) and KEEP the old provenance — evolution, not
-            // blind overwrite.
-            let oldDigest = null
-            if (d.merge_with && typeof d.merge_with === 'string' && d.merge_with.includes('/')) {
-              oldDigest = readDigest(d.merge_with)
-            }
-
-            let body
-            let provenance
-            if (oldDigest !== null) {
-              let merged = null
-              let lastError = null
-              for (let attempt = 0; attempt < 2 && merged === null; attempt++) {
-                try {
-                  const answer = await callSessionLlm(ctx, agent, [
-                    { role: 'user', content: [{ type: 'text', text: buildMergePrompt(oldDigest.text, d.content, sources) }] },
-                  ], DREAM_MAX_TOKENS, { model: config?.model })
-                  merged = String(answer).trim().replace(/^```(?:markdown)?\s*/i, '').replace(/\s*```$/, '').trim()
-                } catch (error) {
-                  lastError = error
-                }
-              }
-              if (merged === null || merged.length === 0) {
-                throw new Error(`merge failed: ${lastError?.message ?? String(lastError)}`)
-              }
-              body = stripDerivedFrom(merged)
-              const oldProvenance = listDerivedFrom(oldDigest.text)
-              provenance = [...new Set([...oldProvenance, ...newProvenance])]
-            } else {
-              body = stripDerivedFrom(d.content).trim()
-              provenance = newProvenance
-            }
-
-            const target = oldDigest !== null
-              ? join(digestRoot(), oldDigest.rel.replace(/^dream\//, ''))
-              : join(digestRoot(), bucket, `${topic}.md`)
-            writeDigest(target, `${body}\n${provenance.length > 0 ? `\n${provenance.join('\n')}\n` : '\n'}`)
-            written.push(relative(digestRoot(), target))
-          } catch (error) {
-            errors.push(`digest write failed (${date}): ${error?.message ?? String(error)}`)
-          }
+      const units = Array.isArray(unitResult.units) ? unitResult.units.slice(0, MAX_UNITS) : []
+      unitsCount += units.length
+      let fileFailed = false
+      for (const unit of units) {
+        // fresh digest snapshot per unit: digests written earlier in this
+        // run (from this file's earlier units or previous files) are visible
+        const digestEntries = walkMemory().filter((e) => e.kind === 'digest')
+        try {
+          const res = await integrateUnit(ctx, agent, unit, file, digestEntries, config, vectorIndex)
+          written.push(res.rel)
+          changes.push(`[${res.rel}][${res.action}]`)
+        } catch (error) {
+          fileFailed = true
+          errors.push(`unit "${unit?.name ?? '?'}" failed (${date}, ${file.rel}): ${error?.message ?? String(error)}`)
         }
-      } catch (error) {
-        errors.push(`batch failed (${date}): ${error?.message ?? String(error)}`)
+      }
+
+      // checkpoint: only a fully successful file is recorded; a file with
+      // any failed unit stays pending and is retried on the next run
+      if (!fileFailed) {
+        const mt = noteMtime(file.rel)
+        if (mt !== null) catalog[file.rel] = mt
       }
     }
   }
-  return { processedDates, written, errors }
+
+  pruneCatalog(catalog)
+  saveCatalog(catalog)
+  return {
+    processedDates,
+    scanned,
+    changed: scanned - unchanged,
+    unchanged,
+    units: unitsCount,
+    written,
+    changes,
+    errors,
+    skipped: false,
+  }
 }
 
 /** Format a run report for the model. */
 export function formatDreamReport(report) {
   const lines = []
   if (report.processedDates.length === 0) {
-    if (report.errors.length === 0) lines.push('无可整合的笔记（没有上次 Dream 之后、今天之前的记忆）。')
-    else lines.push('本次整合失败（所有批次），次日窗口会再扫描。')
+    lines.push('无可整合的笔记（窗口内没有记忆文件）。')
   } else {
     lines.push(`已处理日期：${report.processedDates.join('、')}`)
   }
-  if (report.written.length > 0) lines.push(`写入/更新 digest：\n${report.written.map((w) => `- dream/${w}`).join('\n')}`)
+  lines.push(`扫描 ${report.scanned} 个笔记文件：${report.changed} 个变更（${report.unchanged} 个水位未变跳过）`)
+  if (report.skipped) {
+    if (report.errors.length === 0) lines.push('无新增/变更的笔记，水位跳过，无需整合。')
+    else lines.push('本次整合失败（所有文件），下次运行自动重试。')
+  } else {
+    lines.push(`抽取 ${report.units} 个记忆单元`)
+    if (report.changes.length > 0) {
+      lines.push(`写入/更新 digest：\n${report.changes.map((c) => `- ${c}`).join('\n')}`)
+    } else {
+      lines.push('没有需要写入/更新的 digest。')
+    }
+  }
   if (report.errors.length > 0) lines.push(`失败（已跳过，不影响其他）：\n${report.errors.join('\n')}`)
   return lines.join('\n')
 }

@@ -87,8 +87,11 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
   return {
     name: 'memory_search',
     description:
-      'Search the memory library: daily notes (memory/) and refined digest (dream/). Digest hits rank first. ' +
-      'When embeddingBaseUrl is configured, vector search is fused with keyword hits automatically.',
+      'Search the memory library: daily notes (memory/) and refined digest (dream/). ' +
+      'Returns BLOCK-level hits: rel carries the breadcrumb (file#主题 > 小节), and each snippet is the WHOLE block text (up to ~1000 chars) — ' +
+      'usually enough to continue without opening the file; read the source only when the block is truncated or more context is needed. ' +
+      'Digest hits get a ranking bonus (not a hard guarantee); one file may appear several times with different blocks. ' +
+      'When embeddingBaseUrl is configured, vector search is fused with keyword hits automatically (unified RRF score).',
     parameters: {
       query: { type: 'string', required: true, description: 'Search keywords (Chinese or English, substring match)' },
       limit: { type: 'number', description: 'Max results, default from config searchLimit' },

@@ -6,9 +6,11 @@
 // /api/embed endpoint and fuses vector hits with substring hits (RRF).
 //
 // Design notes:
-//   - granularity: memory files are split into `##` sections (one section is
-//     one memory note), and each section gets its own vector — a whole-file
-//     vector dilutes the semantics of a long note file.
+//   - granularity: memory files are split into `#`-level blocks (see
+//     splitSections in search.js — the single shared definition, so the
+//     vector path and the substring path use the SAME block granularity and
+//     produce matching `rel#title` hits for dedup), and each block gets its
+//     own vector — a whole-file vector dilutes the semantics of a long file.
 //   - cache: a sha1 signature of the file text keys the in-memory index;
 //     files whose text changed are re-embedded lazily on the next search
 //     (first search after a change pays the embedding cost).
@@ -17,7 +19,7 @@
 //     breaks memory_search.
 
 import { createHash } from 'node:crypto'
-import { SNIPPET_CHARS } from './search.js'
+import { blockSnippet, splitBlocks } from './search.js'
 
 /**
  * Minimum cosine similarity for a vector hit to join the fusion.
@@ -30,30 +32,6 @@ export const VEC_THRESHOLD = 0.45
 export const VEC_BATCH = 32
 /** Per-request timeout (ms). */
 export const EMBED_TIMEOUT_MS = 15_000
-
-/**
- * Split a memory file into `#` sections (a top-level heading is one memory
- * note; `##`/`###` sub-headings stay inside their section). Content before
- * the first `#` (e.g. an intro line) becomes the first block with an empty
- * title, so no file content is ever dropped.
- * @param {string} text
- * @returns {Array<{title: string, text: string}>}
- */
-export function splitSections(text) {
-  const lines = String(text).split(/\r?\n/)
-  const sections = []
-  let current = { title: '', text: '' }
-  for (const line of lines) {
-    if (/^#\s/.test(line)) {
-      if (current.text.trim()) sections.push(current)
-      current = { title: line.replace(/^#\s+/, '').trim(), text: line }
-    } else {
-      current.text += (current.text ? '\n' : '') + line
-    }
-  }
-  if (current.text.trim()) sections.push(current)
-  return sections
-}
 
 /** L2-normalize a vector so cosine similarity is a dot product. */
 export function normalizeVec(vec) {
@@ -68,12 +46,6 @@ export function cosine(a, b) {
   let dot = 0
   for (let i = 0; i < a.length; i++) dot += a[i] * b[i]
   return dot
-}
-
-/** Section lead snippet: a vector hit has no hit position, so take the head. */
-export function leadSnippet(text) {
-  const s = String(text).replace(/\s+/g, ' ').trim()
-  return s.length <= SNIPPET_CHARS ? s : `${s.slice(0, SNIPPET_CHARS)}…`
 }
 
 /** Ollama-compatible /api/embed client (batched, bounded timeout). */
@@ -161,11 +133,11 @@ export class VectorIndex {
       const sig = this.sig(entry.text)
       const cached = this.files.get(entry.rel)
       if (cached !== undefined && cached.sig === sig) continue
-      // title-only sections (a heading with no body) carry no signal and
+      // title-only blocks (headings with no body) carry no signal and
       // only produce noise vectors — skip them here; the file text still
       // participates in substring search
-      const sections = splitSections(entry.text).filter(
-        (s) => s.text.replace(/^#\s[^\n]*\n?/, '').trim() !== '',
+      const sections = splitBlocks(entry.text).filter(
+        (s) => s.text.replace(/^(?:#{1,6}\s[^\n]*\n?)+/, '').trim() !== '',
       )
       const vectors = await this.client.embed(sections.map((s) => s.text))
       const blocks = sections.map((s, i) => ({ title: s.title, text: s.text, vec: vectors[i] }))
@@ -201,7 +173,7 @@ export class VectorIndex {
           date: file.date,
           kind: file.kind,
           score: sim,
-          snippet: leadSnippet(block.text),
+          snippet: blockSnippet(block.text, ''),
         })
       }
     }

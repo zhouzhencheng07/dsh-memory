@@ -375,7 +375,17 @@ export async function recallDigests(entries, unit, opts = {}) {
   if (vectorIndex !== null) {
     try {
       const vec = await vectorIndex.query(entries, blob, limit * 3)
-      return fuseHits(sub, vec, limit)
+      const fused = fuseHits(sub, vec, limit * 2)
+      // dream candidates are FILE-level (integrate needs the full digest
+      // text): normalize section-level rels (`rel#title`) back to the base
+      // file, keeping the best-scoring block per file.
+      const byBase = new Map()
+      for (const h of fused) {
+        const base = String(h.rel ?? '').split('#')[0]
+        if (!base) continue
+        if (!byBase.has(base) || h.score > byBase.get(base).score) byBase.set(base, h)
+      }
+      return [...byBase.values()].sort((a, b) => b.score - a.score).slice(0, limit)
     } catch {
       // vector recall is best-effort: a broken embedding service falls back
       // to pure substring results

@@ -68,6 +68,7 @@ import {
   todayStamp,
   walkMemory,
 } from './store.js'
+import { setupDreamAgent } from './dream-setup.js'
 
 /** Digest buckets (QwenPaw-aligned, user decision 2026-08-16). */
 export const BUCKETS = ['personal', 'procedure', 'wiki']
@@ -215,38 +216,30 @@ function isSafeRel(rel) {
 }
 
 /**
- * Build the Dream session task brief: the changed note list (watermark
- * filtered) plus the consolidation rules. The agent executes this with its own
- * tools and must end with a strict JSON report.
+ * Build the Dream session task brief: the changed note list plus the minimal
+ * operational contract. The full consolidation canon lives in the dream
+ * workspace AGENTS.md (installed by the plugin on first run, user-editable,
+ * loaded into every Dream session's system prompt by the `dream` preset's
+ * instructions row) — the brief only references it, lists the pending notes
+ * and demands the strict JSON report.
  * @param {Array<{rel: string}>} pending - changed notes to process
  * @returns {string}
  */
 export function buildDreamBrief(pending) {
   const files = pending.map((f) => `- ${f.rel}`).join('\n')
   return [
-    '你是记忆巩固引擎。把「每日笔记」提炼进长期精炼 digest 库。',
-    '你直接在这个对话里用工具完成全部工作：用 read/glob/grep 读笔记与已有 digest，用 write/edit 新建或更新 digest 文件，最后输出一份 JSON 报告。',
+    '本轮 Dream 巩固任务。',
+    '',
+    '# 先做',
+    '- 先读工作区根目录的 AGENTS.md（巩固规则全集）并严格遵守。',
+    '- 目录：笔记根 ' + memoryRoot() + '，digest 根 ' + digestRoot() + '。',
+    '- 用 read/glob/grep 直接浏览笔记与已有 digest；不要依赖 memory_search 拼凑（它只能按块检索，只当辅助）。',
+    '- 用 write/edit 新建或更新 digest 文件。',
     '',
     '# 本次待处理的笔记（只处理这些；未列出的笔记不要动）',
     files,
     '',
-    '# 目录',
-    `- 笔记根：${memoryRoot()}`,
-    `- digest 根：${digestRoot()}`,
-    '',
-    '# 规则（严格遵守）',
-    `- 桶（bucket）只能是：${BUCKETS.join(' / ')}。`,
-    '桶的选择按「未来读者会从哪里搜索」：用户/团队/项目偏好、约定与约束 → personal；怎么做某事 → procedure；通用知识、原则、作为先例的决策、事实、观察 → wiki。',
-    '一个 digest = 一个可复用抽象，未来会在同一场景被召回。',
-    'digest 是抽象记忆层：只保存未来 agent 应该回忆的可复用原则、模式、流程、约定、偏好。原始细节留在 memory/ 每日笔记中；不进入 digest 的笔记不会丢失——它们仍可被 memory_search 检索。',
-    '禁止输出：一带而过的提及、已知概念复述、事件总括、一次性时间戳、没有复用价值的事实。宁缺毋滥：没有可复用内容就跳过该笔记。',
-    '正文结构：第一行必须是 `# <一句话标题>`，然后才是 `##` 小节；procedure 用 Trigger/Steps/Pre-conditions/Failure modes；personal 用 Rule/Why/How to apply；wiki 用简洁知识条目（定义/原则/事实/观察）。正文简洁抽象，通常 50-200 词。',
-    'digest 路径：`' + digestRoot() + '/<bucket>/<topic>.md`，topic 用英文 kebab-case。',
-    'UPDATE 规则：若已有 digest 与本笔记表达同一抽象，更新它：保留旧内容仍然成立的所有要点与旧 Related 链接，只增不删；补充新细节、前置条件、边界、失败模式；与新证据冲突或过时则修正。',
-    'CREATE 规则：没有同抽象已有 digest 时新建；topic 与同桶已有文件名冲突说明其实是同抽象 → 改为更新已有文件。',
-    '互链：若发现与其它 digest 相关（相邻/互补），在正文末尾追加 `Related: [[digest/<bucket>/<topic>.md]] — 一句话关系` 行（一行，多条用 `; ` 分隔）。',
-    '来源标注：每个 digest 正文末尾追加一行 `derived_from:: [[<笔记 rel>]]`（可多行）。',
-    '不要写任何解释文字、不要 markdown 围栏；工作完成后，最后一条消息必须是严格 JSON：',
+    '工作完成后，最后一条消息必须是严格 JSON（不要解释文字、不要 markdown 围栏）：',
     '{"processed":[{"rel":"<digest rel，如 digest/procedure/xxx.md>","action":"CREATE|UPDATE"}],"skipped":["<笔记 rel>"],"failed":["<笔记 rel>"]}',
     '其中 processed 列出你新建/更新的 digest；skipped 列出你判断无可复用内容的笔记 rel；failed 列出读取或处理失败的笔记 rel。无内容时三者可为空数组。',
   ].join('\n')
@@ -279,15 +272,19 @@ function resolveSessionModel(ctx, config) {
 
 /**
  * Launch one background Dream session through the agents service (no parent
- * required — same path as dsh-headless). The session is bound to the dream
- * workspace cwd, receives the task brief, runs to quiescence, and its final
- * assistant message is parsed as the strict JSON report.
+ * required — same path as dsh-headless). The session binds to the dream
+ * workspace cwd, mounts the `dream` agent preset (file tools + AGENTS.md
+ * rules) with danger-full-access permission, receives the task brief, runs to
+ * quiescence, and its final assistant message is parsed as the strict JSON
+ * report.
  * @param {object} ctx - Cordis context
  * @param {object} config - plugin runtime config (model override)
  * @param {string} brief - the task brief
+ * @param {() => Promise<object|undefined>} [getWorkspace] - resolves the dream
+ *   workspace entity (for UI grouping); resolved once per run, best-effort.
  * @returns {Promise<{sessionId: string, report: object}>}
  */
-export async function runDreamSession(ctx, config, brief) {
+export async function runDreamSession(ctx, config, brief, getWorkspace = async () => undefined) {
   const agents = ctx.get('agents')
   if (agents === undefined) throw new Error('dsh-memory: agents service absent; Dream session unavailable')
   const { provider, model, reasoningEffort } = resolveSessionModel(ctx, config)
@@ -296,9 +293,25 @@ export async function runDreamSession(ctx, config, brief) {
   try {
     handle = await agents.create({
       sessionId: SessionId(sessionId),
-      meta: { cwd: dreamWorkspace(), delegationDepth: 1 },
+      meta: {
+        cwd: dreamWorkspace(),
+        delegationDepth: 1,
+        // persist the preset on the session header so UI/resume can resolve it
+        agentPreset: 'dream',
+      },
       agentOptions: { provider, model, ...(reasoningEffort !== undefined ? { reasoningEffort } : {}) },
+      // mount the dream preset + danger-full-access BEFORE the first request
+      setup: (agentCtx) => setupDreamAgent(agentCtx),
     })
+    // best-effort UI grouping: attach the fresh session to the dream workspace
+    // record so its conversation shows under the "dream" workspace and is
+    // inspectable there (without the record it lands in "Ungrouped")
+    try {
+      const entity = await getWorkspace()
+      await entity?.attachSession?.(sessionId)
+    } catch (error) {
+      console.warn(`dsh-memory: cannot attach dream session ${sessionId} to the dream workspace: ${error?.message ?? String(error)}`)
+    }
     const agent = handle.agent
     await agent.whenIdle()
     agent.followup(createUserMessage({
@@ -430,14 +443,17 @@ export function finalizeDigest(rel, rawText) {
 /**
  * Run one Dream pass: collect the two-day window, filter by the watermark
  * catalog, and if anything changed launch ONE background Dream session that
- * executes the whole consolidation with its own tools. Successful note files
- * are checkpointed in the catalog; failed/unprocessed files stay pending and
- * are retried on the next run.
+ * executes the whole consolidation with its own tools (dream preset + file
+ * tools + danger-full-access). Successful note files are checkpointed in the
+ * catalog; failed/unprocessed files stay pending and are retried on the next
+ * run.
  * @param {object} ctx - Cordis context
  * @param {object} [config] - plugin runtime config (model override)
+ * @param {() => Promise<object|undefined>} [getWorkspace] - resolves the dream
+ *   workspace entity for UI grouping (best-effort).
  * @returns {Promise<{processedDates: string[], scanned: number, changed: number, unchanged: number, sessionId: string|null, written: string[], changes: string[], errors: string[], skipped: boolean}>}
  */
-export async function runDream(ctx, config = {}) {
+export async function runDream(ctx, config = {}, getWorkspace = async () => undefined) {
   const catalog = loadCatalog()
   const window = collectWindow()
   const pending = []
@@ -480,7 +496,7 @@ export async function runDream(ctx, config = {}) {
   const brief = buildDreamBrief(pending.flatMap((p) => p.files))
   let sessionId = null
   try {
-    const { sessionId: sid, report } = await runDreamSession(ctx, config, brief)
+    const { sessionId: sid, report } = await runDreamSession(ctx, config, brief, getWorkspace)
     sessionId = sid
     const processed = Array.isArray(report.processed) ? report.processed : []
     const skipped = Array.isArray(report.skipped) ? report.skipped : []

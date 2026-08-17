@@ -90,6 +90,17 @@ export function dreamWorkspace() {
   return join(pluginRoot(), 'dream')
 }
 
+/**
+ * Dream agent preset root: $DSH_HOME/.agent-presets/dream. The plugin copies
+ * its shipped `dream` preset (preset.yml + agent.cordis.yml) here on first
+ * run so every background Dream session mounts real file tools (in the web
+ * composition those tools live behind agent presets; a preset-less session
+ * resolves only the empty global tool layer and cannot write digest files).
+ */
+export function dreamPresetRoot() {
+  return join(dshHomePath(), '.agent-presets', 'dream')
+}
+
 /** Local date stamp YYYY-MM-DD. */
 export function todayStamp(now = new Date()) {
   const y = now.getFullYear()

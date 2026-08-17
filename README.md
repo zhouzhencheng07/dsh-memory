@@ -37,11 +37,11 @@
 - **子 agent 不参与**（`delegationDepth > 0` 不注入）；`autoMemory: false` 时注入为空（段落常驻、开关即时生效，无需重挂）
 - **无重试**（失败即设计问题，如实暴露）；无专用写入工具（直接用 dsh 自带的 read/edit/write）；无手动命令（每轮提醒即捕获路径）
 
-## Dream 机制（V2：后台对话会话，2026-08-17 重构）
+## Dream 机制（V2：后台对话会话，2026-08-17 重构；0.1.2+ 修正工具面）
 
 - **触发**：`dreamTime`（默认 23:00；非空 = 定时开，空 = 关）。无 `/dream` 命令、无 `memory_dream` 工具（已移除——用户希望机制是「专门用一个工作区跑 Dream」）
 - **存储布局**（用户决定 2026-08-17）：插件数据集中在 `$DSH_HOME/dsh-memory/` 一个根下——`memory/`（每日笔记）、`digest/`（精炼库，原 `$DSH_HOME/dream` 目录更名而来）、`dream/`（**Dream 会话工作区**）。旧 `$DSH_HOME/dream/` 目录**原样保留在磁盘上供人工对比**，但**不再被索引**——所有查询与 Dream 运行只看新布局
-- **执行**：每次定时触发 = 启动**一个后台 agent 会话**（`agents.create`，同 `dsh-headless` 的一发任务路径，无需主对话参与），cwd 绑定 `dream/` 工作区。任务书包含水位筛出的变更笔记清单 + 全部巩固规则；会话用自己的 read/glob/grep/write/edit 工具读完笔记、召回已有 digest、直接写/更新 `digest/<桶>/<主题>.md`，最后输出严格 JSON 报告。**该会话是真实对话**——在 UI 的 dream 工作区里可点开查看每一步（读了什么、写了什么），等于自带审计日志
+- **执行**：每次定时触发 = 启动**一个后台 agent 会话**（`agents.create`，同 `dsh-headless` 的一发任务路径，无需主对话参与），cwd 绑定 `dream/` 工作区。会话挂载插件安装的**专用 `dream` agent preset**（`$DSH_HOME/.agent-presets/dream/`，最小面：文件工具 read/glob/grep/write/edit + 规则加载器）并以 `danger-full-access` 权限运行（digest 根是 dream 工作区的兄弟目录，workspace-write 会拦掉写入）。**巩固规则全集**在 `dream/AGENTS.md`（插件首次运行写入，用户可编辑、不会被覆盖，自动进入每次 Dream 会话的 system prompt）；任务书包含水位筛出的变更笔记清单 + 目录 + 报告 schema。会话直接读写 `digest/<桶>/<主题>.md`，最后输出严格 JSON 报告。**该会话是真实对话**——UI 侧边栏归入名为 **dream** 的工作区（插件显式登记工作区记录并 attach 每次会话），可点开查看每一步（读了什么、写了什么），等于自带审计日志
 - **桶**：`personal`（偏好/约定/约束）、`procedure`（流程/方法）、`wiki`（知识/原则/先例/事实）
 - **窗口 + 水位（QwenPaw/ReMe 对齐）**：扫描「今天 + 昨天」；水位 catalog（`digest/.catalog.json`，`{笔记 rel: mtime}`）只放行**新增/变更**的笔记——无变更直接跳过（不耗 LLM）；会话报告里列出的笔记才写水位、失败/超时文件不写（下次自动重试）；改过的笔记自动重扫
 - **成本优势**：一个会话内多轮工具调用共享上下文，provider 前缀缓存命中——相比旧管线（每文件 + 每 unit 各一次全量无状态大请求）显著省 token
@@ -97,7 +97,7 @@ dsh-memory:
 
 ## 开发
 
-- Node half：`src/*.js`——纯 ESM 手写，**无构建步骤**（`index.js` 入口 + `auto.js` 每轮注入 / `search.js` 检索 / `dream.js` 巩固 / `embed.js` 向量 / `store.js` 存储 / `config-http.js` 配置端点）
+- Node half：`src/*.js`——纯 ESM 手写，**无构建步骤**（`index.js` 入口 + `auto.js` 每轮注入 / `search.js` 检索 / `dream.js` 巩固 / `dream-setup.js` Dream 会话引导（预设安装、工作区登记、setup 挂载）/ `embed.js` 向量 / `store.js` 存储 / `config-http.js` 配置端点）；`preset/` 目录是随插件分发的 Dream agent 预设与规则模板（首次运行复制到 `$DSH_HOME/.agent-presets/dream/` 与 `dream/AGENTS.md`，只写缺失、不覆盖用户编辑）
 - client：`client/bundle.js`——手写 bundle 格式（`window.__ModuleLoader__.load`，与官方 `lib/client.js` 同形），注册到 `settings.plugin.item` 槽
 - 本地开发：源码目录 `node_modules`（真实 pnpm 安装，版本与运行时一致）负责解析 `@deepseek-ai/*`；运行时解析靠 dsh 扁平模块 fallback，两者互不干扰
 

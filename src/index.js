@@ -60,6 +60,7 @@ import { dreamWorkspace, todayStamp, timeStamp, walkMemory } from './store.js'
 import { formatHits, fuseHits, searchMemory } from './search.js'
 import { EmbeddingClient, VectorIndex } from './embed.js'
 import { formatDreamReport, runDream } from './dream.js'
+import { ensureDreamAgentsMd, ensureDreamPreset } from './dream-setup.js'
 import { NS, installConfigEndpoint } from './config-http.js'
 
 export const name = 'dsh-memory'
@@ -204,14 +205,41 @@ export function apply(ctx) {
   // No background LLM call, no turn counting, no manual command.
   ctx.effect(() => installAutoMemory(ctx, getConfig))
 
-  // Dream workspace: ensure the directory that every background Dream session
-  // binds to as its cwd exists (dsh-workspace validates the cwd directory
-  // when it associates sessions with workspaces).
+  // Dream session bootstrap: ensure the pieces every Dream pass needs BEFORE
+  // the first run —
+  //   - the dream workspace directory (every background Dream session's cwd);
+  //   - the `dream` agent preset in $DSH_HOME/.agent-presets/dream (file
+  //     tools; without a preset the agent resolves only the empty global tool
+  //     layer and cannot write digest files);
+  //   - the consolidation rulebook as dream/AGENTS.md (auto-loaded into every
+  //     Dream session's system prompt);
+  //   - a UI workspace record titled "dream" so Dream conversations group
+  //     under one workspace instead of "Ungrouped".
+  // All steps are best-effort: an existing file/record is respected, a
+  // missing service degrades with a warning, and the Dream pass itself still
+  // reports the outcome.
   try {
     mkdirSync(dreamWorkspace(), { recursive: true })
   } catch (error) {
     console.warn(`dsh-memory: cannot create dream workspace: ${error?.message ?? String(error)}`)
   }
+  ensureDreamPreset()
+  ensureDreamAgentsMd()
+  const dreamWorkspaceReady = (async () => {
+    try {
+      const registry = ctx.get('workspaceRegistry')
+      if (registry === undefined) {
+        console.warn('dsh-memory: workspaceRegistry service absent; dream sessions will show as ungrouped')
+        return undefined
+      }
+      const entity = await registry.create(dreamWorkspace(), 'dream')
+      console.log(`dsh-memory: dream workspace record ensured (${dreamWorkspace()})`)
+      return entity
+    } catch (error) {
+      console.warn(`dsh-memory: cannot register dream workspace: ${error?.message ?? String(error)}`)
+      return undefined
+    }
+  })()
 
   // scheduled Dream: fires once per day at dreamTime when it is non-empty; a
   // blank dreamTime disables the timer. Each pass runs as a background agent
@@ -227,7 +255,7 @@ export function apply(ctx) {
         if (dreamedToday === today) return
         if (timeStamp(now) !== runtime.dreamTime) return
         dreamedToday = today
-        runDream(ctx, runtime)
+        runDream(ctx, runtime, () => dreamWorkspaceReady)
           .then((report) => console.log(`dsh-memory dream: ${report.processedDates.length} date(s), session ${report.sessionId ?? 'n/a'}, ${report.changes.length} digest change(s), ${report.errors.length} error(s)`))
           .catch((error) => console.error(`dsh-memory dream failed: ${error?.message ?? String(error)}`))
       } catch (error) {

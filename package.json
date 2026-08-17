@@ -13,6 +13,7 @@
   "files": [
     "src",
     "client",
+    "preset",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"

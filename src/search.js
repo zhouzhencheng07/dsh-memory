@@ -48,11 +48,13 @@ export function occurrenceCount(value, needle) {
 /**
  * Split a memory file into heading-aware blocks with ancestor breadcrumbs
  * (QwenPaw/ReMe markdown-chunker style, user decision 2026-08-17):
- * - ANY `##`+ heading starts a new block (`###`/deeper nest inside the
- *   nearest `##`); a `#` topic with no `##` children stays one block;
+ * - ANY heading level (`#`–`######`) starts a new block: a `###` 子节 is
+ *   its OWN block whose breadcrumb nests under the nearest `##` (title
+ *   `主题 > 小节 > 子节`), exactly like ReMe's heading-tree chunks; a `#`
+ *   topic with no deeper headings stays one block;
  * - each block's title is its heading breadcrumb (`父 > 子 > 孙`) and its
  *   text starts with the breadcrumb heading lines, so a block is
- *   self-contained (a `##` 小节 knows its `#` 主题);
+ *   self-contained (a `###` 子节 knows its `##` 小节 and `#` 主题);
  * - content before the first heading becomes a block with an empty title;
  * - this is the SINGLE block definition shared with the vector index
  *   (embed.js), keeping the substring and vector paths symmetric

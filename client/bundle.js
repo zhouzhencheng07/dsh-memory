@@ -28,11 +28,9 @@ window.__ModuleLoader__.load({
     // ── locale copy ──────────────────────────────────────────────────────────
     const en = {
       title: "Memory (dsh-memory)",
-      description: "Cross-session memory: background Auto-Memory, memory_search, and Dream consolidation.",
+      description: "Cross-session memory: background Auto-Memory and memory_search.",
       searchLimit: "Search result limit",
       searchLimitHint: "Default result count for memory_search (1-10).",
-      dreamTime: "Dream trigger time",
-      dreamTimeHint: "Daily trigger time, HH:MM; clearing restores the default 23:00 (disable the timer with '' in settings.yaml).",
       embeddingBaseUrl: "Embedding base URL",
       embeddingBaseUrlHint: "Ollama base URL (e.g. http://localhost:11434) for vector search; blank disables it.",
       embeddingModel: "Embedding model",
@@ -54,11 +52,9 @@ window.__ModuleLoader__.load({
     };
     const zh = {
       title: "记忆（dsh-memory）",
-      description: "跨会话记忆：后台 Auto-Memory 自动捕获、memory_search 检索与 Dream 长期巩固。",
+      description: "跨会话记忆：后台 Auto-Memory 自动捕获与 memory_search 检索。",
       searchLimit: "搜索返回条数",
       searchLimitHint: "memory_search 默认返回条数（1-10）。",
-      dreamTime: "Dream 触发时间",
-      dreamTimeHint: "每日触发时间，HH:MM；清除 = 恢复默认 23:00（关闭定时请在 settings.yaml 显式设为 ''）。",
       embeddingBaseUrl: "向量嵌入服务地址",
       embeddingBaseUrlHint: "Ollama 基地址（如 http://localhost:11434），用于向量检索；留空禁用。",
       embeddingModel: "嵌入模型",
@@ -84,7 +80,6 @@ window.__ModuleLoader__.load({
     /** Section fields this card edits: kind is number | bool | text. */
     const FIELDS = [
       { field: "searchLimit", kind: "number", label: "searchLimit", hint: "searchLimitHint" },
-      { field: "dreamTime", kind: "text", label: "dreamTime", hint: "dreamTimeHint" },
       { field: "embeddingBaseUrl", kind: "text", label: "embeddingBaseUrl", hint: "embeddingBaseUrlHint" },
       { field: "embeddingModel", kind: "text", label: "embeddingModel", hint: "embeddingModelHint" },
       { field: "autoMemory", kind: "bool", label: "autoMemory", hint: "autoMemoryHint" }
@@ -377,6 +372,7 @@ window.__ModuleLoader__.load({
       }
       ctx.slots.inject("settings.plugin.item", () => ctx.slots.register({
         name: "settings.plugin.item",
+        key: "dsh-memory",
         id: "dsh-memory",
         order: 30,
         inject: () => ({ api })

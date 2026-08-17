@@ -14,19 +14,45 @@
 // or more context is needed). One file may legitimately contribute several
 // matching blocks; dedup is at the BLOCK level (the same block never
 // appears twice), not the file level.
+//
+// RECENCY DECAY (user decision 2026-08-18): every note carries its date in
+// the rel (YYYY-MM-DD/...); ranking multiplies each block's score by a
+// decay weight that falls with age but STOPS at a floor — an old but
+// genuinely relevant block stays reachable (it is not silently truncated),
+// while a newer note on the same topic outranks it unless the old one is
+// much stronger. The digest/dream layer is gone; recency guidance + decay
+// replace its convergence job.
 
 /** Max chars of a returned snippet window (oversized-block fallback). */
 export const SNIPPET_CHARS = 200
 /** Blocks up to this many chars are returned WHOLE as the snippet. */
 export const SNIPPET_FULL = 1000
-/** Rank boost for digest (Dream) hits: digested knowledge ranks above raw notes. */
-export const DIGEST_BOOST = 3
 /** RRF constant: the standard k=60 keeps rank scores on a comparable scale. */
 export const RRF_K = 60
+/** Recency half-life in days: a note halves its weight every this many days. */
+export const RECENCY_HALF_LIFE_DAYS = 30
+/** Recency floor: an old note's weight never falls below this (0 < floor < 1). */
+export const RECENCY_FLOOR = 0.4
 
 /** Case-insensitive normalization (Chinese passes through unchanged). */
 export function normalize(value) {
   return String(value).toLocaleLowerCase()
+}
+
+/**
+ * Recency decay weight for a note date (YYYY-MM-DD): 1.0 for today, halving
+ * every RECENCY_HALF_LIFE_DAYS, and NEVER below RECENCY_FLOOR — an old but
+ * strongly relevant block keeps competing instead of being truncated away.
+ * Unparseable/missing dates get weight 1 (no decay).
+ * @param {string} date - YYYY-MM-DD (note rel's date component)
+ * @returns {number} weight in [RECENCY_FLOOR, 1]
+ */
+export function recencyWeight(date) {
+  const ms = Date.parse(String(date ?? ''))
+  if (!Number.isFinite(ms)) return 1
+  const days = Math.max(0, (Date.now() - ms) / 86400000)
+  const w = Math.pow(0.5, days / RECENCY_HALF_LIFE_DAYS)
+  return Math.max(RECENCY_FLOOR, w)
 }
 
 /** Non-overlapping count of `needle` occurrences in `value` (case-insensitive). */
@@ -127,8 +153,9 @@ export function blockSnippet(text, query) {
  * block of every entry is a candidate hit (`rel#面包屑`); raw occurrence
  * counts are damped by block length (BM25-style, relative to the corpus
  * average block length) so long blocks do not automatically outscore compact
- * digests; digest blocks then get the DIGEST_BOOST multiplier. Title-only
- * blocks are skipped (mirroring the vector index, which also skips them).
+ * ones, then multiplied by the note's recency decay weight (old notes
+ * recede but never drop below the floor). Title-only blocks are skipped
+ * (mirroring the vector index, which also skips them).
  * Ties break by date (newer first), then path.
  * @param {Array<{rel: string, date: string, kind: string, text: string}>} entries
  * @param {string} query - non-empty search text
@@ -151,7 +178,7 @@ export function searchMemory(entries, query, limit = 5) {
     const raw = occurrenceCount(block.text, query)
     if (raw === 0) continue
     const lenNorm = raw / (1 + block.text.length / avgLen)
-    const score = entry.kind === 'digest' ? lenNorm * DIGEST_BOOST : lenNorm
+    const score = lenNorm * recencyWeight(entry.date)
     hits.push({
       rel: block.title ? `${entry.rel}#${block.title}` : entry.rel,
       date: entry.date,
@@ -184,7 +211,7 @@ export function formatHits(hits) {
   if (hits.length === 0) return 'No memory found.'
   const lines = []
   for (const hit of hits) {
-    const tag = hit.kind === 'digest' ? 'digest' : hit.date || 'index'
+    const tag = hit.date || 'index'
     lines.push(`- [${tag}] ${hit.rel} (score ${formatScore(hit.score)})`)
     const s = String(hit.snippet ?? '')
     lines.push(s.split('\n').map((l, i) => (i === 0 ? `  ${l}` : `    ${l}`)).join('\n'))
@@ -193,24 +220,18 @@ export function formatHits(hits) {
 }
 
 /**
- * Modest RRF ranking bonus for digest hits (user decision 2026-08-17):
- * digest preference is a nudge (~0.3 rank positions per list), NOT a hard
- * guarantee — a strongly relevant raw block can still outrank a digest.
- */
-export const DIGEST_RRF_BONUS = 0.005
-
-/**
  * Reciprocal-rank fusion of two PRE-SORTED hit lists (descending by each
  * list's own score). Absolute scores are ignored — only ranks matter — so
  * substring and cosine scores fuse on a comparable scale. The OUTPUT score
- * is the unified RRF fusion score (same dimension for every hit).
+ * is the unified RRF fusion score (same dimension for every hit), then
+ * multiplied by the note's recency decay weight (old notes recede but never
+ * drop below the floor).
  *
  * Dedup is by the EXACT block rel (`rel#title`): the same block never
  * appears twice even when both lists matched it, while DIFFERENT blocks of
  * the same file legitimately coexist (block-level retrieval, user decision
  * 2026-08-17). The kept entry is the first occurrence (substring hits are
- * added first and are more precise). Digest blocks get DIGEST_RRF_BONUS
- * once per block.
+ * added first and are more precise).
  * @param {Array<{rel: string, date: string, kind: string, score: number, snippet: string}>} listA
  * @param {Array<{rel: string, date: string, kind: string, score: number, snippet: string}>} listB
  * @param {number} [limit=5]
@@ -232,8 +253,7 @@ export function fuseHits(listA, listB, limit = 5) {
   add(listB)
   const out = []
   for (const [rel, hit] of byRel) {
-    let score = rank.get(rel) ?? 0
-    if (hit.kind === 'digest') score += DIGEST_RRF_BONUS
+    const score = (rank.get(rel) ?? 0) * recencyWeight(hit.date)
     out.push({ ...hit, score })
   }
   out.sort((a, b) => {

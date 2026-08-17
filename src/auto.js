@@ -17,28 +17,19 @@
 // (empty answer). The conversation loop assembles valid requests and the
 // main model answers normally, so neither failure mode exists. No retry: a
 // failure means the design is wrong and must surface.
+//
+// Layer simplification (2026-08-18): the Dream/digest layer was removed.
+// Memory is the ONLY layer — the daily notes are edited in place across
+// days, carry their date in the rel, and search applies recency guidance
+// plus a recency decay, so converging "the current state of a convention"
+// happens at query time instead of in a nightly background session.
 
 import { join } from 'node:path'
-import { dreamWorkspace, memoryRoot, sessionSlug, todayStamp } from './store.js'
+import { memoryRoot, sessionSlug, todayStamp } from './store.js'
 
 /** Today's daily memory file for one session (assembly-time fresh). */
 const memoryFileFor = (session) =>
   join(memoryRoot(), todayStamp(), `${sessionSlug(session.header?.cwd)}.md`)
-
-/**
- * True when a session runs inside the Dream workspace: the background Dream
- * session's cwd is the shared dream/ workspace directory. Such sessions must
- * NEVER receive the auto-memory reminder — the Dream run already reads memory/
- * notes and writes digest/ files; a reminder would push it to record its own
- * run as new daily memory (noise).
- */
-function isDreamSession(session) {
-  const dream = dreamWorkspace()
-  const cwd = session?.header?.cwd
-  if (!cwd) return false
-  const normalized = String(cwd).replace(/[\\/]+$/, '').toLowerCase()
-  return normalized === dream.replace(/[\\/]+$/, '').toLowerCase()
-}
 
 /**
  * The per-turn system-prompt reminder (short: it is present on EVERY model
@@ -52,9 +43,8 @@ export function buildMemoryReminder(file, sessionId) {
   return [
     '【自动记忆】每轮审视本轮内容：有值得跨会话保留的新内容（决策及原因、偏好/纠正/约定、踩坑与修复、可复用命令/流程、当前状态变化）时，增量写入今日记忆文件 ' + file + '：',
     '- 文件不存在 → write 新建；已存在 → 只用 edit 精确修改（禁止整体 write 覆盖）。',
-    '- 只写尚未覆盖的新内容；已有内容过时或错误时更新修正；关键处逐字引用；多级标题（# 主题 + ## 小节）；全文不写日期/时间戳。',
+    '- 只写尚未覆盖的新内容；已有内容过时或错误时更新修正；关键处逐字引用；用正常 markdown 多级标题组织；全文不写日期/时间戳。',
     '- 首行维护来源注释 <!-- 会话来源: ' + sessionId + ' -->（多会话并列追加）。',
-    '- 本轮没有值得记的新内容就不要动文件。',
   ].join('\n')
 }
 
@@ -85,10 +75,9 @@ export function installAutoMemory(ctx, getConfig) {
             if (!getConfig().autoMemory) return ''
             const session = context.agent?.session
             if (!session?.id) return ''
-            // Sub-agents (delegationDepth > 0) and Dream workspace sessions are
-            // excluded: their memory belongs to the main agent's consolidation.
+            // Sub-agents (delegationDepth > 0) are excluded: their memory
+            // belongs to the main agent's consolidation.
             if ((session.header?.delegationDepth ?? 0) > 0) return ''
-            if (isDreamSession(session)) return ''
             return buildMemoryReminder(memoryFileFor(session), session.id)
           },
         })

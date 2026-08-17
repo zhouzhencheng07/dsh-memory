@@ -1,15 +1,19 @@
 // dsh-memory plugin for DeepSeek Harness (dsh)
 //
-// Cross-session memory: daily per-workspace notes (memory/), Dream digest
-// buckets (digest/), and memory search.
+// Cross-session memory: daily per-workspace notes under
+// $DSH_HOME/dsh-memory/YYYY-MM-DD/, and memory search.
 //
-// Design (agreed with the user, 2026-08-16/17):
+// Design (agreed with the user, 2026-08-16/17/18):
 //   - memory = reusable experience reference (decisions, pitfalls, ideas),
 //     NOT a project archive; project detail lives in the project's AGENTS.md
 //     and project docs.
-//   - retrieval layers: digest library (refined) -> memory (daily notes).
-//     (session_search was removed 2026-08-17: raw conversations are no
-//     longer searchable through this plugin.)
+//   - retrieval: memory_search over the daily notes (block-level, substring +
+//     optional vector, recency-weighted). The digest/dream layer was REMOVED
+//     (2026-08-18, user decision): memory notes are edited in place and carry
+//     their date in the rel, so recency guidance ("newer notes win conflicts,
+//     older notes still hold details") plus a recency decay in ranking covers
+//     the old digest's convergence job; the digest/ and dream/ directories
+//     were deleted, the memory/ sublevel was merged into the plugin root.
 //   - memory is written by the MAIN AGENT inside the conversation: while
 //     autoMemory is on, the plugin contributes a system-prompt section
 //     (assembled fresh per request) that reminds the agent every turn to
@@ -22,34 +26,9 @@
 //     pipeline was tried and failed: hand-built requests broke provider
 //     pairing -> 400, and reasoning-max models answered nothing. The
 //     conversation loop assembles valid requests.)
-//   - Dream V2 (2026-08-17): scheduled daily when dreamTime is set; the /dream
-//     command and memory_dream tool were REMOVED (user decision — the
-//     mechanism is now a dedicated dream/ workspace where every pass runs as a
-//     background agent conversation the user can inspect in the UI). Each pass
-//     collects the notes of today+yesterday, filters them by a source-level
-//     watermark catalog (digest/.catalog.json, {note rel: mtime}), and if
-//     anything changed launches ONE background agent session through the
-//     agents service (no parent required — the same path dsh-headless uses),
-//     bound to the dream workspace cwd, mounted on the dedicated `dream`
-//     agent preset (file tools + danger-full-access). The session reads the
-//     notes and existing digests with its own tools and writes/updates digest
-//     files under digest/{personal,procedure,wiki}/<topic>.md itself; the
-//     plugin then validates the writes (provenance/Related hygiene, safe
-//     paths) and checkpoints the handled notes in the catalog. The session
-//     model is the agent default selection (config.model override removed).
-//   - layout (user decision 2026-08-17): one plugin data root
-//     $DSH_HOME/dsh-memory/ holding memory/ (notes), digest/ (refined
-//     library, renamed from the former $DSH_HOME/dream directory), and dream/
-//     (Dream session workspace). The legacy $DSH_HOME/dream/ library stays on
-//     disk untouched for manual comparison but is NOT indexed: all queries
-//     and Dream runs see only the new layout.
 //   - config: `dsh-memory:` section in $DSH_HOME/settings.yaml, hot-reloaded
-//     (searchLimit / dreamTime / embeddingBaseUrl / embeddingModel /
-//     autoMemory), see README. dreamTime non-empty = Dream timer on;
-//     autoMemory true = per-turn reminder on. The Dream model override
-//     (config.model) was REMOVED 2026-08-17: every Dream session now uses the
-//     agent default selection — the `dream` preset session is a normal agent
-//     conversation, and a separate override had no consumer left.
+//     (searchLimit / embeddingBaseUrl / embeddingModel / autoMemory), see
+//     README.
 //
 // Plain ESM JavaScript on purpose. `@deepseek-ai/dsh-tools` and the settings
 // helpers resolve at runtime through Node's parent-walk (the harness installs
@@ -58,13 +37,10 @@
 import z from '@deepseek-ai/schemastery'
 import { installSettingsSection } from '@deepseek-ai/dsh-settings'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { mkdirSync } from 'node:fs'
 import { installAutoMemory } from './auto.js'
-import { dreamWorkspace, todayStamp, timeStamp, walkMemory } from './store.js'
+import { walkMemory } from './store.js'
 import { formatHits, fuseHits, searchMemory } from './search.js'
 import { EmbeddingClient, VectorIndex } from './embed.js'
-import { formatDreamReport, runDream } from './dream.js'
-import { ensureDreamAgentsMd, ensureDreamPreset } from './dream-setup.js'
 import { NS, installConfigEndpoint } from './config-http.js'
 
 export const name = 'dsh-memory'
@@ -79,8 +55,6 @@ export const inject = ['tools']
 export const Config = z.object({
   /** Default result count for memory_search. */
   searchLimit: z.natural().min(1).max(10).default(5),
-  /** Daily Dream trigger time, HH:MM; non-empty = timer on, empty = off. */
-  dreamTime: z.string().default('23:00'),
   /** Ollama base URL for optional vector search (e.g. http://localhost:11434); empty disables it. */
   embeddingBaseUrl: z.string(),
   /** Embedding model served by embeddingBaseUrl. */
@@ -95,10 +69,12 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
   return {
     name: 'memory_search',
     description:
-      'Search the memory library: daily notes (memory/) and the refined digest library (digest/). ' +
+      'Search the memory library: daily notes (memory/) only. ' +
       'Returns BLOCK-level hits: rel carries the multi-level breadcrumb (file#主题 > 小节 > 子节, any heading level starts its own block), and each snippet is the WHOLE block text (up to ~1000 chars) — ' +
       'usually enough to continue without opening the file; read the source only when the block is truncated or more context is needed. ' +
-      'Digest hits get a ranking bonus (not a hard guarantee); one file may appear several times with different blocks. ' +
+      'The rel embeds the note date (YYYY-MM-DD/...): when several hits bear on the same topic, prefer the NEWER note (it reflects the latest state); ' +
+      'an older note may still hold details the new one dropped — merge them rather than trusting either alone. ' +
+      'Ranking already discounts older notes (recency decay), so older but still relevant blocks remain reachable. ' +
       'When embeddingBaseUrl is configured, vector search is fused with keyword hits automatically (unified RRF score).',
     parameters: {
       query: { type: 'string', required: true, description: 'Search keywords (Chinese or English, substring match)' },
@@ -145,7 +121,6 @@ export function apply(ctx) {
   // default when a field is reset/cleared but not yet saved.
   const DEFAULTS = {
     searchLimit: 5,
-    dreamTime: '23:00',
     embeddingBaseUrl: '',
     embeddingModel: 'bge-m3',
     autoMemory: true,
@@ -155,7 +130,6 @@ export function apply(ctx) {
     /** Mirror one resolved source onto the live runtime object. */
     const applySource = (source) => {
       runtime.searchLimit = source.searchLimit
-      runtime.dreamTime = source.dreamTime
       runtime.embeddingBaseUrl = source.embeddingBaseUrl ?? ''
       runtime.embeddingModel = source.embeddingModel || 'bge-m3'
       runtime.autoMemory = source.autoMemory !== false
@@ -193,9 +167,7 @@ export function apply(ctx) {
     return vectorIndex
   }
 
-  // Dream is NOT exposed as a tool/command anymore (2026-08-17): it runs as a
-  // scheduled background agent session in the dream workspace. The only model
-  // tool is memory_search.
+  // the only model tool is memory_search (no Dream layer since 2026-08-18).
   const tools = [
     memorySearchTool(ctx, getConfig, getVectorIndex),
   ]
@@ -208,80 +180,6 @@ export function apply(ctx) {
   // agent writes the daily memory file with its own read/edit/write tools.
   // No background LLM call, no turn counting, no manual command.
   ctx.effect(() => installAutoMemory(ctx, getConfig))
-
-  // Dream session bootstrap: ensure the pieces every Dream pass needs BEFORE
-  // the first run —
-  //   - the dream workspace directory (every background Dream session's cwd);
-  //   - the `dream` agent preset in $DSH_HOME/.agent-presets/dream (file
-  //     tools; without a preset the agent resolves only the empty global tool
-  //     layer and cannot write digest files);
-  //   - the consolidation rulebook as dream/AGENTS.md (auto-loaded into every
-  //     Dream session's system prompt);
-  //   - a UI workspace record titled "dream" so Dream conversations group
-  //     under one workspace instead of "Ungrouped".
-  // All steps are best-effort: an existing file/record is respected, a
-  // missing service degrades with a warning, and the Dream pass itself still
-  // reports the outcome.
-  try {
-    mkdirSync(dreamWorkspace(), { recursive: true })
-  } catch (error) {
-    console.warn(`dsh-memory: cannot create dream workspace: ${error?.message ?? String(error)}`)
-  }
-  ensureDreamPreset()
-  ensureDreamAgentsMd()
-  // Re-resolved on EVERY Dream run (not once at apply): rows load
-  // concurrently and the workspace service registers itself before its async
-  // init finishes, so an apply-time create raced it and failed permanently
-  // for the process — every session then landed in "Ungrouped". `loader.await()`
-  // waits for the whole tree (the same readiness gate dsh-headless uses), and
-  // registry.create is idempotent (returns the existing record), so first-run
-  // auto-creation is reliable for any deployment.
-  let warnedRegistry = false
-  const getDreamWorkspace = async () => {
-    try {
-      await ctx.get('loader')?.await?.()
-      const registry = ctx.get('workspaceRegistry')
-      if (registry === undefined) {
-        if (!warnedRegistry) {
-          warnedRegistry = true
-          console.warn('dsh-memory: workspaceRegistry service absent; dream sessions will show as ungrouped')
-        }
-        return undefined
-      }
-      return await registry.create(dreamWorkspace(), 'dream')
-    } catch (error) {
-      console.warn(`dsh-memory: cannot register dream workspace: ${error?.message ?? String(error)}`)
-      return undefined
-    }
-  }
-  // one early attempt so the record exists at startup (best-effort)
-  getDreamWorkspace().then((entity) => {
-    if (entity !== undefined) console.log(`dsh-memory: dream workspace record ensured (${dreamWorkspace()})`)
-  })
-
-  // scheduled Dream: fires once per day at dreamTime when it is non-empty; a
-  // blank dreamTime disables the timer. Each pass runs as a background agent
-  // session in the dream workspace (no parent, no /dream command anymore).
-  const timer = ctx.get('timer')
-  if (timer !== undefined) {
-    let dreamedToday = ''
-    const disposer = timer.interval(() => {
-      try {
-        if (!runtime.dreamTime) return
-        const now = new Date()
-        const today = todayStamp(now)
-        if (dreamedToday === today) return
-        if (timeStamp(now) !== runtime.dreamTime) return
-        dreamedToday = today
-        runDream(ctx, getDreamWorkspace)
-          .then((report) => console.log(`dsh-memory dream: ${report.processedDates.length} date(s), session ${report.sessionId ?? 'n/a'}, ${report.changes.length} digest change(s), ${report.errors.length} error(s)`))
-          .catch((error) => console.error(`dsh-memory dream failed: ${error?.message ?? String(error)}`))
-      } catch (error) {
-        console.error(`dsh-memory dream scheduler: ${error?.message ?? String(error)}`)
-      }
-    }, 60 * 1000)
-    ctx.effect(() => disposer)
-  }
 
   // browser configuration card: our own webServer endpoint (the official
   // plugin-configuration surface has a hardcoded api-proxy whitelist this

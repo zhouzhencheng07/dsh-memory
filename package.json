@@ -1,7 +1,7 @@
 {
   "name": "dsh-memory",
-  "version": "0.1.2",
-  "description": "Cross-session memory for DeepSeek Harness (dsh): background Auto-Memory, per-workspace daily notes, Dream consolidation, memory/session search, and optional vector search",
+  "version": "0.2.0",
+  "description": "Cross-session memory for DeepSeek Harness (dsh): background Auto-Memory, per-workspace daily notes, memory search, and optional vector search",
   "license": "MIT",
   "type": "module",
   "main": "./src/index.js",
@@ -13,7 +13,6 @@
   "files": [
     "src",
     "client",
-    "preset",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
@@ -22,9 +21,7 @@
     "dsh",
     "deepseek-harness",
     "plugin",
-    "memory",
-    "digest",
-    "dream"
+    "memory"
   ],
   "dsh": {
     "bundle": {

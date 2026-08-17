@@ -1,34 +1,21 @@
 // dsh-memory — storage layer (global under $DSH_HOME, node:fs, zero deps).
 //
 // Layout (GLOBAL — one shared library for every workspace; user decision
-// 2026-08-17: one plugin data root under $DSH_HOME instead of three loose
-// top-level folders):
-//   $DSH_HOME/dsh-memory/memory/YYYY-MM-DD/<workspace-slug>.md
+// 2026-08-18: the whole plugin data root IS the memory root — the `memory/`
+// sublevel and the digest/dream layers were removed):
+//   $DSH_HOME/dsh-memory/YYYY-MM-DD/<workspace-slug>.md
 //                                                     one daily file per
 //                                                     workspace; topics are
 //                                                     `#` first-level headings
-//   $DSH_HOME/dsh-memory/digest/<bucket>/<topic>.md   refined digest library
-//                                                     (the former `dream/`
-//                                                     folder, renamed when the
-//                                                     digest concept and the
-//                                                     Dream session workspace
-//                                                     were separated)
-//   $DSH_HOME/dsh-memory/dream/                       Dream session workspace:
-//                                                     the cwd bound to every
-//                                                     background Dream session,
-//                                                     so its conversations show
-//                                                     up under one workspace in
-//                                                     the UI (dsh-workspace
-//                                                     auto-bootstraps a
-//                                                     workspace per distinct
-//                                                     session cwd)
-//   ($DSH_HOME/dream — the pre-rename digest library is NOT indexed anymore:
-//   kept on disk only for manual comparison with the new digest/ output; all
-//   queries and Dream runs see exclusively the new layout above)
 //
-// NO state files: Dream uses a fixed two-day window (no watermark), and
-// Auto-Memory has no counters (the daily date is taken at assembly time).
-// Dream's source-level watermark lives in digest/.catalog.json.
+// The directory is named `dsh-memory` (not `memory`) on purpose: if the
+// harness ever ships its own memory feature it will likely use `memory`.
+//
+// NO state files: Auto-Memory has no counters (the daily date is taken at
+// assembly time), and there is no Dream layer anymore (user decision
+// 2026-08-18 — memory search + recency guidance replaces the digest library;
+// the old digest/ and dream/ directories were removed, the memory/ sublevel
+// was merged into the root).
 //
 // The workspace slug matches $DSH_HOME/sessions/<slug>/ (e.g.
 // `--D-Project-dsh-bundle-dsh-memory--`), so every conversation running in
@@ -43,8 +30,8 @@
 //   - atomic: temp file + rename, so a crash never leaves a torn note.
 //   - serialized through one in-process write queue.
 //
-// Historical per-topic files (memory/YYYY-MM-DD/<topic>.md) are still read
-// by walkMemory; appendNote() remains for compatibility with old writers.
+// Historical per-topic files (YYYY-MM-DD/<topic>.md) are still read by
+// walkMemory; appendNote() remains for compatibility with old writers.
 
 import {
   appendFileSync,
@@ -64,54 +51,22 @@ export function pluginRoot() {
 }
 
 /**
- * Memory root: $DSH_HOME/dsh-memory/memory (global, shared across every
- * workspace; moved here from $DSH_HOME/memory on first use).
+ * Memory root: $DSH_HOME/dsh-memory — the memory files live DIRECTLY under
+ * the plugin data root (the `memory/` sublevel was removed 2026-08-18:
+ * user decision — memory is the only layer left, so no nesting needed).
  */
 export function memoryRoot() {
-  return join(pluginRoot(), 'memory')
+  return pluginRoot()
 }
 
 /**
- * Digest root: $DSH_HOME/dsh-memory/digest (Dream output; the former
- * $DSH_HOME/dream folder, renamed when the digest concept was separated from
- * the Dream session workspace).
+ * Local date stamp YYYY-MM-DD.
  */
-export function digestRoot() {
-  return join(pluginRoot(), 'digest')
-}
-
-/**
- * Dream session workspace: $DSH_HOME/dsh-memory/dream. The cwd bound to every
- * background Dream session; dsh-workspace auto-creates one workspace entry per
- * distinct session cwd, so all Dream conversations appear under ONE workspace
- * in the UI and are inspectable like any other conversation.
- */
-export function dreamWorkspace() {
-  return join(pluginRoot(), 'dream')
-}
-
-/**
- * Dream agent preset root: $DSH_HOME/.agent-presets/dream. The plugin copies
- * its shipped `dream` preset (preset.yml + agent.cordis.yml) here on first
- * run so every background Dream session mounts real file tools (in the web
- * composition those tools live behind agent presets; a preset-less session
- * resolves only the empty global tool layer and cannot write digest files).
- */
-export function dreamPresetRoot() {
-  return join(dshHomePath(), '.agent-presets', 'dream')
-}
-
-/** Local date stamp YYYY-MM-DD. */
 export function todayStamp(now = new Date()) {
   const y = now.getFullYear()
   const m = String(now.getMonth() + 1).padStart(2, '0')
   const d = String(now.getDate()).padStart(2, '0')
   return `${y}-${m}-${d}`
-}
-
-/** HH:MM stamp for section headers. */
-export function timeStamp(now = new Date()) {
-  return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
 }
 
 /**
@@ -208,7 +163,7 @@ export function parseSections(text) {
 }
 
 /**
- * Upsert `# ` sections into `memory/<date>/<slug>.md`.
+ * Upsert `# ` sections into `<date>/<slug>.md`.
  * @param {string} date - YYYY-MM-DD
  * @param {string} slug - workspace slug (see sessionSlug)
  * @param {Array<{title: string, content: string, mode?: 'replace'|'append'}>} ops
@@ -261,41 +216,25 @@ export function readMemoryFile(file, maxBytes = 2 * 1024 * 1024) {
 }
 
 /**
- * Walk every markdown file under the plugin's memory roots (the new layout
- * only: memoryRoot() notes + digestRoot() digests; the pre-rename
- * $DSH_HOME/dream library is deliberately NOT indexed — it stays on disk for
- * manual comparison only, user decision 2026-08-17).
- * rel paths use forward slashes; notes are relative to memoryRoot()
- * (YYYY-MM-DD/<topic>.md); digests carry a `digest/` prefix.
- * @returns {Array<{rel: string, date: string, kind: 'note'|'digest', text: string}>}
+ * Walk every markdown file under the memory root (the only layer — the
+ * digest/dream layers were removed 2026-08-18). rel paths use forward
+ * slashes and are relative to memoryRoot() (YYYY-MM-DD/<topic>.md).
+ * @returns {Array<{rel: string, date: string, kind: 'note', text: string}>}
  */
 export function walkMemory() {
   const out = []
   const root = memoryRoot()
-  const dig = digestRoot()
-  if (existsSync(root) && statSync(root).isDirectory()) {
-    for (const day of readdirSync(root, { withFileTypes: true })) {
-      if (!day.isDirectory()) continue
-      // memory/YYYY-MM-DD/<topic>.md
-      const dir = join(root, day.name)
-      for (const inner of readdirSync(dir, { withFileTypes: true })) {
-        if (!inner.isFile() || !inner.name.endsWith('.md')) continue
-        const file = join(dir, inner.name)
-        const text = readMemoryFile(file)
-        if (text === null || text.length === 0) continue
-        out.push({ rel: relative(root, file).replaceAll('\\', '/'), date: day.name, kind: 'note', text })
-      }
-    }
-  }
-  if (!existsSync(dig) || !statSync(dig).isDirectory()) return out
-  for (const bucket of readdirSync(dig, { withFileTypes: true })) {
-    if (!bucket.isDirectory()) continue
-    for (const inner of readdirSync(join(dig, bucket.name), { withFileTypes: true })) {
+  if (!existsSync(root) || !statSync(root).isDirectory()) return out
+  for (const day of readdirSync(root, { withFileTypes: true })) {
+    if (!day.isDirectory()) continue
+    // YYYY-MM-DD/<topic>.md
+    const dir = join(root, day.name)
+    for (const inner of readdirSync(dir, { withFileTypes: true })) {
       if (!inner.isFile() || !inner.name.endsWith('.md')) continue
-      const file = join(dig, bucket.name, inner.name)
+      const file = join(dir, inner.name)
       const text = readMemoryFile(file)
       if (text === null || text.length === 0) continue
-      out.push({ rel: `digest/${relative(dig, file).replaceAll('\\', '/')}`, date: '', kind: 'digest', text })
+      out.push({ rel: relative(root, file).replaceAll('\\', '/'), date: day.name, kind: 'note', text })
     }
   }
   return out

@@ -365,12 +365,21 @@ export function listDerivedFrom(text) {
   return out
 }
 
-/** Extract note rels referenced by `derived_from:: [[rel]]` lines. */
+/**
+ * Extract note rels referenced by `derived_from:: [[rel]]` lines. Rels are
+ * normalized to the catalog's bare form: sessions may write
+ * `memory/2026-08-16/<slug>.md` (the AGENTS.md rulebook was missing or the
+ * model guessed the prefix), while the watermark catalog keys notes by
+ * `2026-08-16/<slug>.md` — a `memory/` prefix makes every checkpoint miss and
+ * keeps the catalog empty forever. Multi-link lines
+ * (`derived_from:: [[A]]; [[B]]`) yield every link.
+ */
 export function derivedFromRels(text) {
   const out = []
   for (const line of listDerivedFrom(text)) {
-    const m = /\[\[([^\]]+)\]\]/.exec(line)
-    if (m) out.push(m[1])
+    for (const m of line.matchAll(/\[\[([^\]]+)\]\]/g)) {
+      out.push(m[1].replace(/^memory\//, ''))
+    }
   }
   return out
 }
@@ -420,12 +429,19 @@ export function finalizeDigest(rel, rawText) {
   if (cleaned.length === 0) return ''
   const title = cleaned.split('\n').find((l) => l.trim().length > 0)?.trim() ?? ''
   const content = title.startsWith('# ') ? cleaned : `# ${safeTopic(clean.replace(/\.md$/, ''))}\n\n${cleaned}`
-  const provenance = [...(old === null ? [] : listDerivedFrom(old.text))]
-  for (const line of agentProvenance) {
-    if (!provenance.includes(line)) provenance.push(line)
+  const provenance = [...(old === null ? [] : listDerivedFrom(old.text)), ...agentProvenance]
+  // normalize `memory/`-prefixed note rels (see derivedFromRels) and dedupe:
+  // healing existing files on the next plugin-parsed run
+  const provenanceFinal = []
+  const seenProvenance = new Set()
+  for (const line of provenance) {
+    const normalized = line.replace(/\[\[memory\/([^\]]+)\]\]/g, '[[$1]]')
+    if (seenProvenance.has(normalized)) continue
+    seenProvenance.add(normalized)
+    provenanceFinal.push(normalized)
   }
   const related = renderRelated([...(old === null ? [] : parseRelated(old.text)), ...agentRelated])
-  const parts = [content, related, ...provenance].filter(Boolean)
+  const parts = [content, related, ...provenanceFinal].filter(Boolean)
   const final = `${parts.join('\n')}\n`
   if (old !== null && old.text === final) return ''
   return final

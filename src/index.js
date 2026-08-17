@@ -229,21 +229,35 @@ export function apply(ctx) {
   }
   ensureDreamPreset()
   ensureDreamAgentsMd()
-  const dreamWorkspaceReady = (async () => {
+  // Re-resolved on EVERY Dream run (not once at apply): rows load
+  // concurrently and the workspace service registers itself before its async
+  // init finishes, so an apply-time create raced it and failed permanently
+  // for the process — every session then landed in "Ungrouped". `loader.await()`
+  // waits for the whole tree (the same readiness gate dsh-headless uses), and
+  // registry.create is idempotent (returns the existing record), so first-run
+  // auto-creation is reliable for any deployment.
+  let warnedRegistry = false
+  const getDreamWorkspace = async () => {
     try {
+      await ctx.get('loader')?.await?.()
       const registry = ctx.get('workspaceRegistry')
       if (registry === undefined) {
-        console.warn('dsh-memory: workspaceRegistry service absent; dream sessions will show as ungrouped')
+        if (!warnedRegistry) {
+          warnedRegistry = true
+          console.warn('dsh-memory: workspaceRegistry service absent; dream sessions will show as ungrouped')
+        }
         return undefined
       }
-      const entity = await registry.create(dreamWorkspace(), 'dream')
-      console.log(`dsh-memory: dream workspace record ensured (${dreamWorkspace()})`)
-      return entity
+      return await registry.create(dreamWorkspace(), 'dream')
     } catch (error) {
       console.warn(`dsh-memory: cannot register dream workspace: ${error?.message ?? String(error)}`)
       return undefined
     }
-  })()
+  }
+  // one early attempt so the record exists at startup (best-effort)
+  getDreamWorkspace().then((entity) => {
+    if (entity !== undefined) console.log(`dsh-memory: dream workspace record ensured (${dreamWorkspace()})`)
+  })
 
   // scheduled Dream: fires once per day at dreamTime when it is non-empty; a
   // blank dreamTime disables the timer. Each pass runs as a background agent
@@ -259,7 +273,7 @@ export function apply(ctx) {
         if (dreamedToday === today) return
         if (timeStamp(now) !== runtime.dreamTime) return
         dreamedToday = today
-        runDream(ctx, () => dreamWorkspaceReady)
+        runDream(ctx, getDreamWorkspace)
           .then((report) => console.log(`dsh-memory dream: ${report.processedDates.length} date(s), session ${report.sessionId ?? 'n/a'}, ${report.changes.length} digest change(s), ${report.errors.length} error(s)`))
           .catch((error) => console.error(`dsh-memory dream failed: ${error?.message ?? String(error)}`))
       } catch (error) {

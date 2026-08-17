@@ -4,5 +4,8 @@ node_modules/
 .DS_Store
 # 本地开发约定，不进公共仓库
 AGENTS.md
+# 例外：preset/ 里的 AGENTS.md 是随插件分发的 Dream 规则书模板（安装时复制到
+# dream 工作区根），必须进包——没有它 Dream 会话无规则书、溯源格式会失控
+!preset/AGENTS.md
 # 本地开发安装副产物（插件零依赖，无 package.json dependencies，lockfile 无发布意义）
 pnpm-lock.yaml

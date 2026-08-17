@@ -1,14 +1,34 @@
 // dsh-memory — storage layer (global under $DSH_HOME, node:fs, zero deps).
 //
-// Layout (GLOBAL — one shared library for every workspace):
-//   $DSH_HOME/memory/YYYY-MM-DD/<workspace-slug>.md   one daily file per
+// Layout (GLOBAL — one shared library for every workspace; user decision
+// 2026-08-17: one plugin data root under $DSH_HOME instead of three loose
+// top-level folders):
+//   $DSH_HOME/dsh-memory/memory/YYYY-MM-DD/<workspace-slug>.md
+//                                                     one daily file per
 //                                                     workspace; topics are
 //                                                     `#` first-level headings
-//   $DSH_HOME/dream/<bucket>/<topic>.md               Dream digest (preference/
-//                                                     procedure/fact/knowledge)
+//   $DSH_HOME/dsh-memory/digest/<bucket>/<topic>.md   refined digest library
+//                                                     (the former `dream/`
+//                                                     folder, renamed when the
+//                                                     digest concept and the
+//                                                     Dream session workspace
+//                                                     were separated)
+//   $DSH_HOME/dsh-memory/dream/                       Dream session workspace:
+//                                                     the cwd bound to every
+//                                                     background Dream session,
+//                                                     so its conversations show
+//                                                     up under one workspace in
+//                                                     the UI (dsh-workspace
+//                                                     auto-bootstraps a
+//                                                     workspace per distinct
+//                                                     session cwd)
+//   ($DSH_HOME/dream — the pre-rename digest library is NOT indexed anymore:
+//   kept on disk only for manual comparison with the new digest/ output; all
+//   queries and Dream runs see exclusively the new layout above)
 //
 // NO state files: Dream uses a fixed two-day window (no watermark), and
 // Auto-Memory has no counters (the daily date is taken at assembly time).
+// Dream's source-level watermark lives in digest/.catalog.json.
 //
 // The workspace slug matches $DSH_HOME/sessions/<slug>/ (e.g.
 // `--D-Project-dsh-bundle-dsh-memory--`), so every conversation running in
@@ -38,14 +58,36 @@ import {
 import { join, relative } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 
-/** Memory root: $DSH_HOME/memory (global, shared across every workspace). */
-export function memoryRoot() {
-  return dshHomePath('memory')
+/** Plugin data root: $DSH_HOME/dsh-memory (one folder for the whole plugin). */
+export function pluginRoot() {
+  return join(dshHomePath(), 'dsh-memory')
 }
 
-/** Digest root: $DSH_HOME/dream (Dream output). */
+/**
+ * Memory root: $DSH_HOME/dsh-memory/memory (global, shared across every
+ * workspace; moved here from $DSH_HOME/memory on first use).
+ */
+export function memoryRoot() {
+  return join(pluginRoot(), 'memory')
+}
+
+/**
+ * Digest root: $DSH_HOME/dsh-memory/digest (Dream output; the former
+ * $DSH_HOME/dream folder, renamed when the digest concept was separated from
+ * the Dream session workspace).
+ */
 export function digestRoot() {
-  return dshHomePath('dream')
+  return join(pluginRoot(), 'digest')
+}
+
+/**
+ * Dream session workspace: $DSH_HOME/dsh-memory/dream. The cwd bound to every
+ * background Dream session; dsh-workspace auto-creates one workspace entry per
+ * distinct session cwd, so all Dream conversations appear under ONE workspace
+ * in the UI and are inspectable like any other conversation.
+ */
+export function dreamWorkspace() {
+  return join(pluginRoot(), 'dream')
 }
 
 /** Local date stamp YYYY-MM-DD. */
@@ -208,10 +250,12 @@ export function readMemoryFile(file, maxBytes = 2 * 1024 * 1024) {
 }
 
 /**
- * Walk every markdown file under the global memory roots.
- * rel paths use forward slashes; notes are relative to memory/
- * (YYYY-MM-DD/<topic>.md), digests carry a `dream/` prefix (kept for
- * dream.js merge_with / derived_from handling).
+ * Walk every markdown file under the plugin's memory roots (the new layout
+ * only: memoryRoot() notes + digestRoot() digests; the pre-rename
+ * $DSH_HOME/dream library is deliberately NOT indexed — it stays on disk for
+ * manual comparison only, user decision 2026-08-17).
+ * rel paths use forward slashes; notes are relative to memoryRoot()
+ * (YYYY-MM-DD/<topic>.md); digests carry a `digest/` prefix.
  * @returns {Array<{rel: string, date: string, kind: 'note'|'digest', text: string}>}
  */
 export function walkMemory() {
@@ -232,16 +276,15 @@ export function walkMemory() {
       }
     }
   }
-  if (existsSync(dig) && statSync(dig).isDirectory()) {
-    for (const bucket of readdirSync(dig, { withFileTypes: true })) {
-      if (!bucket.isDirectory()) continue
-      for (const inner of readdirSync(join(dig, bucket.name), { withFileTypes: true })) {
-        if (!inner.isFile() || !inner.name.endsWith('.md')) continue
-        const file = join(dig, bucket.name, inner.name)
-        const text = readMemoryFile(file)
-        if (text === null || text.length === 0) continue
-        out.push({ rel: `dream/${relative(dig, file).replaceAll('\\', '/')}`, date: '', kind: 'digest', text })
-      }
+  if (!existsSync(dig) || !statSync(dig).isDirectory()) return out
+  for (const bucket of readdirSync(dig, { withFileTypes: true })) {
+    if (!bucket.isDirectory()) continue
+    for (const inner of readdirSync(join(dig, bucket.name), { withFileTypes: true })) {
+      if (!inner.isFile() || !inner.name.endsWith('.md')) continue
+      const file = join(dig, bucket.name, inner.name)
+      const text = readMemoryFile(file)
+      if (text === null || text.length === 0) continue
+      out.push({ rel: `digest/${relative(dig, file).replaceAll('\\', '/')}`, date: '', kind: 'digest', text })
     }
   }
   return out

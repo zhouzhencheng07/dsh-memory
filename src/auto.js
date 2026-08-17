@@ -19,11 +19,26 @@
 // failure means the design is wrong and must surface.
 
 import { join } from 'node:path'
-import { memoryRoot, sessionSlug, todayStamp } from './store.js'
+import { dreamWorkspace, memoryRoot, sessionSlug, todayStamp } from './store.js'
 
 /** Today's daily memory file for one session (assembly-time fresh). */
 const memoryFileFor = (session) =>
   join(memoryRoot(), todayStamp(), `${sessionSlug(session.header?.cwd)}.md`)
+
+/**
+ * True when a session runs inside the Dream workspace: the background Dream
+ * session's cwd is the shared dream/ workspace directory. Such sessions must
+ * NEVER receive the auto-memory reminder — the Dream run already reads memory/
+ * notes and writes digest/ files; a reminder would push it to record its own
+ * run as new daily memory (noise).
+ */
+function isDreamSession(session) {
+  const dream = dreamWorkspace()
+  const cwd = session?.header?.cwd
+  if (!cwd) return false
+  const normalized = String(cwd).replace(/[\\/]+$/, '').toLowerCase()
+  return normalized === dream.replace(/[\\/]+$/, '').toLowerCase()
+}
 
 /**
  * The per-turn system-prompt reminder (short: it is present on EVERY model
@@ -70,7 +85,10 @@ export function installAutoMemory(ctx, getConfig) {
             if (!getConfig().autoMemory) return ''
             const session = context.agent?.session
             if (!session?.id) return ''
+            // Sub-agents (delegationDepth > 0) and Dream workspace sessions are
+            // excluded: their memory belongs to the main agent's consolidation.
             if ((session.header?.delegationDepth ?? 0) > 0) return ''
+            if (isDreamSession(session)) return ''
             return buildMemoryReminder(memoryFileFor(session), session.id)
           },
         })

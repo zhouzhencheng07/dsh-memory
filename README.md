@@ -14,21 +14,17 @@
 
 | 工具 | 说明 |
 |---|---|
-| `memory_search` | 搜索 memory + dream：**块级检索 + 渐进取用**（标题感知块：任意 `##`+ 级小节独立成块、带 `rel#主题 > 小节` 面包屑；**snippet 返回整个块** ≤1000 字符——通常无需开源文件即可继续，超大块才截取并提示长度；同文件多块可同时返回、同块不重复）、长度归一子串匹配（中文友好）、digest 加成；配置向量服务后自动升级为子串 + 向量 RRF 融合（块级精确去重、输出统一融合分） |
-| `memory_dream` | 立即执行一次 Dream 巩固（同 `/dream`，模型侧入口） |
+| `memory_search` | 搜索 memory + digest：**块级检索 + 渐进取用**（标题感知块：任意 `##`+ 级小节独立成块、带 `rel#主题 > 小节` 面包屑；**snippet 返回整个块** ≤1000 字符——通常无需开源文件即可继续，超大块才截取并提示长度；同文件多块可同时返回、同块不重复）、长度归一子串匹配（中文友好）、digest 加成；配置向量服务后自动升级为子串 + 向量 RRF 融合（块级精确去重、输出统一融合分） |
 
-**命令**（用户侧）：
-
-| 命令 | 说明 |
-|---|---|
-| `/dream` | 立即执行一次 Dream 巩固（不依赖定时开关） |
+**命令**：
+- Dream 无手动命令（`/dream` 与 `memory_dream` 已于 2026-08-17 移除）：巩固只由 `dreamTime` 定时触发，每次在 **dream/ 工作区**里跑一个后台 agent 会话
 
 **系统集成**（无 UI 组件，零官方改动）：
 
 | 功能 | 说明 |
 |---|---|
-| Auto-Memory | 每轮 system prompt 注入记忆提醒（`dsh-memory:auto`，order 200），主 agent 自行判断并写入；子 agent 不提示 |
-| Dream 定时 | `dreamTime`（默认 23:00）每日自动巩固；空 = 关（`/dream` 手动仍可用） |
+| Auto-Memory | 每轮 system prompt 注入记忆提醒（`dsh-memory:auto`，order 200），主 agent 自行判断并写入；子 agent 与 Dream 工作区会话不提示 |
+| Dream 定时 | `dreamTime`（默认 23:00）每日触发一次后台 Dream 会话；空 = 关 |
 | 配置卡片 | 设置 → 插件 → 插件配置 → 记忆（dsh-memory），改完保存即热生效（settings.yaml 持久化，无需重启） |
 
 ## 记忆写入：Auto-Memory
@@ -41,15 +37,17 @@
 - **子 agent 不参与**（`delegationDepth > 0` 不注入）；`autoMemory: false` 时注入为空（段落常驻、开关即时生效，无需重挂）
 - **无重试**（失败即设计问题，如实暴露）；无专用写入工具（直接用 dsh 自带的 read/edit/write）；无手动命令（每轮提醒即捕获路径）
 
-## Dream 机制
+## Dream 机制（V2：后台对话会话，2026-08-17 重构）
 
-- **触发**：`dreamTime`（默认 23:00；非空 = 定时开，空 = 关）每日定时 + `/dream` 命令 + `memory_dream` 工具
+- **触发**：`dreamTime`（默认 23:00；非空 = 定时开，空 = 关）。无 `/dream` 命令、无 `memory_dream` 工具（已移除——用户希望机制是「专门用一个工作区跑 Dream」）
+- **存储布局**（用户决定 2026-08-17）：插件数据集中在 `$DSH_HOME/dsh-memory/` 一个根下——`memory/`（每日笔记）、`digest/`（精炼库，原 `$DSH_HOME/dream` 目录更名而来）、`dream/`（**Dream 会话工作区**）。旧 `$DSH_HOME/dream/` 目录**原样保留在磁盘上供人工对比**，但**不再被索引**——所有查询与 Dream 运行只看新布局
+- **执行**：每次定时触发 = 启动**一个后台 agent 会话**（`agents.create`，同 `dsh-headless` 的一发任务路径，无需主对话参与），cwd 绑定 `dream/` 工作区。任务书包含水位筛出的变更笔记清单 + 全部巩固规则；会话用自己的 read/glob/grep/write/edit 工具读完笔记、召回已有 digest、直接写/更新 `digest/<桶>/<主题>.md`，最后输出严格 JSON 报告。**该会话是真实对话**——在 UI 的 dream 工作区里可点开查看每一步（读了什么、写了什么），等于自带审计日志
 - **桶**：`personal`（偏好/约定/约束）、`procedure`（流程/方法）、`wiki`（知识/原则/先例/事实）
-- **窗口 + 水位（QwenPaw/ReMe 对齐）**：扫描「今天 + 昨天」；水位 catalog（`dream/.catalog.json`，`{笔记 rel: mtime}`）只放行**新增/变更**的笔记——无变更直接跳过（不耗 LLM）；成功文件写水位、失败文件不写（下次自动重试）；改过的笔记自动重扫
-- **流程（逐文件顺序执行）**：每个变更笔记文件单独走 `extract`（1 次 LLM 调用 → 记忆单元 units，宁缺毋滥闸口，≤5 个；跨文件同抽象合并发生在 integrate 层）→ `recall`（确定性召回：IDF 加权子串 + 首行加分，配置向量后与向量 RRF 融合——等价 node_search 的 BM25+向量混合，top 8 候选全量正文）→ `integrate`（每 unit：分类 same_abstraction/related/unrelated → 恰好一个动作 **CREATE / CORROBORATE / REFINE / CORRECT**，输出最终完整正文；每 unit 前刷新 digest 快照，同一运行中前面的 digest 对后续可见）→ 系统写盘进 `dream/<桶>/<主题>.md`
-- **LLM 调用控制**：**不传 maxTokens**——使用模型本身输出上限（dsh-llm 自动填 adapter 默认，deepseek 256k，与正常 agent 回合一致）；`reasoningEffort` 跟随会话；单次调用 30 分钟超时兜底；失败重试一次（附严格 JSON 提醒），失败报告带模型回答片段
-- **正文结构**：首行 `# 一句话标题`（与 memory 笔记的 `# 主题` 对齐，也让 Dream 召回的首行加权命中真实标题）+ `##` 小节（procedure: Trigger/Steps/Pre-conditions/Failure modes；personal: Rule/Why/How to apply；wiki: 定义/原则/事实）；不引入更深层级
-- **互链与溯源**：文件尾 `Related: [[dream/...]] — 关系说明` 行（系统维护，只增不删、按 rel 去重）+ `derived_from:: [[memory/...]]` 溯源；原始笔记永不删除；UPDATE 保留旧要点与全部来源
+- **窗口 + 水位（QwenPaw/ReMe 对齐）**：扫描「今天 + 昨天」；水位 catalog（`digest/.catalog.json`，`{笔记 rel: mtime}`）只放行**新增/变更**的笔记——无变更直接跳过（不耗 LLM）；会话报告里列出的笔记才写水位、失败/超时文件不写（下次自动重试）；改过的笔记自动重扫
+- **成本优势**：一个会话内多轮工具调用共享上下文，provider 前缀缓存命中——相比旧管线（每文件 + 每 unit 各一次全量无状态大请求）显著省 token
+- **LLM 模型**：`model` 配置（`provider/model`）覆盖，空 = agent 默认模型；无 maxTokens（模型自身输出上限）
+- **正文结构**：首行 `# 一句话标题`（与 memory 笔记的 `# 主题` 对齐）+ `##` 小节（procedure: Trigger/Steps/Pre-conditions/Failure modes；personal: Rule/Why/How to apply；wiki: 定义/原则/事实）；不引入更深层级
+- **互链与溯源**：文件尾 `Related: [[digest/...]] — 关系说明` 行（系统维护，只增不删、按 rel 去重）+ `derived_from:: [[memory/...]]` 溯源；原始笔记永不删除；UPDATE 保留旧要点与全部来源
 - **质量 gate**：宁缺毋滥——只提炼可长期复用的抽象（禁止 passing mention/已知概念复述/事件总括/一次性时间戳）；不进 digest 的笔记仍被 `memory_search` 全库检索
 - **语言**：不强制——digest 语言跟随源笔记/会话模型（同 QwenPaw）
 
@@ -74,12 +72,11 @@ dsh plugin --profile web add "github:zhouzhencheng07/dsh-memory"
 ## 使用
 
 ```sh
-# 用户侧
-/dream                              # 立即巩固一次（把近两天笔记提炼进 dream/）
-
 # 模型侧（工具）
 memory_search query="向量检索阈值"  # 查记忆库（digest 优先，可向量融合）
-memory_dream                        # 巩固（同 /dream）
+
+# Dream：无手动命令，dreamTime 定时在 dream/ 工作区自动跑后台会话；
+# 每次巩固后可到 UI 的 dream 工作区打开对应会话查看完整过程
 ```
 
 Auto-Memory 无需任何操作：开启后每轮自动提醒，主 agent 自行决定写入。
@@ -91,8 +88,8 @@ Auto-Memory 无需任何操作：开启后每轮自动提醒，主 agent 自行�
 ```yaml
 dsh-memory:
   searchLimit: 5          # memory_search 默认返回条数（1-10）
-  model: ''               # Dream LLM 模型覆盖，provider/model；留空 = 会话模型
-  dreamTime: '23:00'      # Dream 每日触发时间（HH:MM）；留空 = 关闭定时（/dream 手动仍可用）
+  model: ''               # Dream 模型覆盖，provider/model；留空 = agent 默认模型
+  dreamTime: '23:00'      # Dream 每日触发时间（HH:MM）；留空 = 关闭定时
   embeddingBaseUrl: ''    # Ollama 基地址（如 http://localhost:11434）；留空禁用向量检索
   embeddingModel: 'bge-m3'  # embeddingBaseUrl 提供的嵌入模型名
   autoMemory: true        # 自动记忆开关：每轮 system prompt 提醒；false = 无提醒

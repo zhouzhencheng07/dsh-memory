@@ -36,8 +36,9 @@
 //     provenance lines maintained by the system (additive), Related lines
 //     preserved, no stray bare [[...]] lines in the body.
 //
-// Session model follows the same resolution order as callSessionLlm used to:
-// explicit config.model override ("provider/model") → agent default selection.
+// Session model = the agent default selection (the config.model override was
+// removed 2026-08-17: the Dream session is a normal agent conversation, so a
+// separate override had no consumer left).
 //
 // No session timeout: the task is an ordinary agent conversation that runs to
 // quiescence on its own (the agent loop is the lifecycle owner). Provenance:
@@ -250,17 +251,12 @@ export function buildDreamBrief(pending) {
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve the Dream session's provider/model/reasoningEffort: explicit config
- * override ("provider/model") wins; otherwise the agent default selection.
+ * Resolve the Dream session's provider/model/reasoningEffort: always the
+ * agent default selection (the config.model override was removed 2026-08-17
+ * — the Dream session is a normal agent conversation on the `dream` preset,
+ * and a separate override had no consumer left).
  */
-function resolveSessionModel(ctx, config) {
-  const override = String(config?.model ?? '').trim()
-  if (override) {
-    const idx = override.indexOf('/')
-    if (idx > 0 && idx < override.length - 1) {
-      return { provider: override.slice(0, idx), model: override.slice(idx + 1), reasoningEffort: undefined }
-    }
-  }
+function resolveSessionModel(ctx) {
   const selection = ctx.get('agentDefaultModel')?.currentSelection?.()
   if (!selection?.provider || !selection?.model) throw new Error('dsh-memory: cannot resolve a provider/model')
   return { provider: selection.provider, model: selection.model, reasoningEffort: undefined }
@@ -278,16 +274,15 @@ function resolveSessionModel(ctx, config) {
  * quiescence, and its final assistant message is parsed as the strict JSON
  * report.
  * @param {object} ctx - Cordis context
- * @param {object} config - plugin runtime config (model override)
  * @param {string} brief - the task brief
  * @param {() => Promise<object|undefined>} [getWorkspace] - resolves the dream
  *   workspace entity (for UI grouping); resolved once per run, best-effort.
  * @returns {Promise<{sessionId: string, report: object}>}
  */
-export async function runDreamSession(ctx, config, brief, getWorkspace = async () => undefined) {
+export async function runDreamSession(ctx, brief, getWorkspace = async () => undefined) {
   const agents = ctx.get('agents')
   if (agents === undefined) throw new Error('dsh-memory: agents service absent; Dream session unavailable')
-  const { provider, model, reasoningEffort } = resolveSessionModel(ctx, config)
+  const { provider, model, reasoningEffort } = resolveSessionModel(ctx)
   const sessionId = `session-${randomUUID()}`
   let handle
   try {
@@ -448,12 +443,11 @@ export function finalizeDigest(rel, rawText) {
  * catalog; failed/unprocessed files stay pending and are retried on the next
  * run.
  * @param {object} ctx - Cordis context
- * @param {object} [config] - plugin runtime config (model override)
  * @param {() => Promise<object|undefined>} [getWorkspace] - resolves the dream
  *   workspace entity for UI grouping (best-effort).
  * @returns {Promise<{processedDates: string[], scanned: number, changed: number, unchanged: number, sessionId: string|null, written: string[], changes: string[], errors: string[], skipped: boolean}>}
  */
-export async function runDream(ctx, config = {}, getWorkspace = async () => undefined) {
+export async function runDream(ctx, getWorkspace = async () => undefined) {
   const catalog = loadCatalog()
   const window = collectWindow()
   const pending = []
@@ -496,7 +490,7 @@ export async function runDream(ctx, config = {}, getWorkspace = async () => unde
   const brief = buildDreamBrief(pending.flatMap((p) => p.files))
   let sessionId = null
   try {
-    const { sessionId: sid, report } = await runDreamSession(ctx, config, brief, getWorkspace)
+    const { sessionId: sid, report } = await runDreamSession(ctx, brief, getWorkspace)
     sessionId = sid
     const processed = Array.isArray(report.processed) ? report.processed : []
     const skipped = Array.isArray(report.skipped) ? report.skipped : []

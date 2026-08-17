@@ -5,8 +5,13 @@
 // which a plugin cannot extend. Instead the card talks to this plugin's own
 // webServer endpoint — the same seam dsh-client-modules uses for /plugins:
 //
-//   GET  /dsh-memory/config -> { value, user, writable }
+//   GET  /dsh-memory/config -> { value, user, defaults, writable }
 //   POST /dsh-memory/config -> body { ops: [{op:'set'|'unset', field, value?}] }
+//
+// `defaults` mirrors what clearing a user value resolves to (the schema
+// defaults): the card displays it when a field is reset/cleared but not yet
+// saved, so the unsaved UI is consistent with what the deployment will
+// actually use.
 //
 // Writes go through the settings service (schema validation, settings.yaml
 // persistence, hot-reload), so no upstream package is touched.
@@ -54,8 +59,10 @@ function respond(res, status, payload) {
  * silently never registers.
  * @param {object} ctx - Cordis context
  * @param {() => object} getConfig - resolves the live runtime config
+ * @param {() => object} [getDefaults] - resolves the schema defaults shown by
+ *   the card for reset/cleared fields
  */
-export function installConfigEndpoint(ctx, getConfig) {
+export function installConfigEndpoint(ctx, getConfig, getDefaults = () => ({})) {
   ctx.inject(['webServer'], (childCtx) => {
     childCtx.effect(() => {
       let disposer
@@ -81,6 +88,7 @@ export function installConfigEndpoint(ctx, getConfig) {
                 respond(res, 200, {
                   value: getConfig(),
                   user,
+                  defaults: getDefaults(),
                   writable: settings !== undefined,
                 })
                 return

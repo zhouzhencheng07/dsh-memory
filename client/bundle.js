@@ -31,10 +31,8 @@ window.__ModuleLoader__.load({
       description: "Cross-session memory: background Auto-Memory, memory_search, and Dream consolidation.",
       searchLimit: "Search result limit",
       searchLimitHint: "Default result count for memory_search (1-10).",
-      model: "Dream model override",
-      modelHint: "provider/model for Dream LLM calls; blank uses the session model.",
       dreamTime: "Dream trigger time",
-      dreamTimeHint: "Daily trigger time, HH:MM; blank = timer off (/dream still works).",
+      dreamTimeHint: "Daily trigger time, HH:MM; clearing restores the default 23:00 (disable the timer with '' in settings.yaml).",
       embeddingBaseUrl: "Embedding base URL",
       embeddingBaseUrlHint: "Ollama base URL (e.g. http://localhost:11434) for vector search; blank disables it.",
       embeddingModel: "Embedding model",
@@ -59,10 +57,8 @@ window.__ModuleLoader__.load({
       description: "跨会话记忆：后台 Auto-Memory 自动捕获、memory_search 检索与 Dream 长期巩固。",
       searchLimit: "搜索返回条数",
       searchLimitHint: "memory_search 默认返回条数（1-10）。",
-      model: "Dream 模型覆盖",
-      modelHint: "Dream LLM 的 provider/model；留空 = 会话模型。",
       dreamTime: "Dream 触发时间",
-      dreamTimeHint: "每日触发时间，HH:MM；留空 = 关闭定时（/dream 手动仍可用）。",
+      dreamTimeHint: "每日触发时间，HH:MM；清除 = 恢复默认 23:00（关闭定时请在 settings.yaml 显式设为 ''）。",
       embeddingBaseUrl: "向量嵌入服务地址",
       embeddingBaseUrlHint: "Ollama 基地址（如 http://localhost:11434），用于向量检索；留空禁用。",
       embeddingModel: "嵌入模型",
@@ -88,7 +84,6 @@ window.__ModuleLoader__.load({
     /** Section fields this card edits: kind is number | bool | text. */
     const FIELDS = [
       { field: "searchLimit", kind: "number", label: "searchLimit", hint: "searchLimitHint" },
-      { field: "model", kind: "text", label: "model", hint: "modelHint" },
       { field: "dreamTime", kind: "text", label: "dreamTime", hint: "dreamTimeHint" },
       { field: "embeddingBaseUrl", kind: "text", label: "embeddingBaseUrl", hint: "embeddingBaseUrlHint" },
       { field: "embeddingModel", kind: "text", label: "embeddingModel", hint: "embeddingModelHint" },
@@ -180,17 +175,24 @@ window.__ModuleLoader__.load({
       if (state.status === "loading") return null;
       const title = t("title");
       const value = state.value ?? {};
+      const defaults = state.defaults ?? {};
       const user = state.user;
       const writable = state.writable === true;
       const error = state.error;
 
       const overridden = (field) => user !== undefined && user !== null && typeof user === "object" && Object.prototype.hasOwnProperty.call(user, field);
 
+      /** What clearing a field resolves to (the schema default), for display. */
+      const defaultText = (field) => {
+        const d = defaults[field];
+        return d === undefined || d === null ? "" : String(d);
+      };
+
       const effective = (field) => {
         const draft = drafts[field];
-        if (draft !== undefined) return draft.text;
+        if (draft !== undefined) return draft.clear ? defaultText(field) : draft.text;
         const v = value[field];
-        return v === undefined || v === null ? "" : String(v);
+        return v === undefined || v === null ? defaultText(field) : String(v);
       };
 
       const edit = (field, text) => {

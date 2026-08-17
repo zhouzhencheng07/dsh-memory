@@ -45,7 +45,7 @@
 - **桶**：`personal`（偏好/约定/约束）、`procedure`（流程/方法）、`wiki`（知识/原则/先例/事实）
 - **窗口 + 水位（QwenPaw/ReMe 对齐）**：扫描「今天 + 昨天」；水位 catalog（`digest/.catalog.json`，`{笔记 rel: mtime}`）只放行**新增/变更**的笔记——无变更直接跳过（不耗 LLM）；会话报告里列出的笔记才写水位、失败/超时文件不写（下次自动重试）；改过的笔记自动重扫
 - **成本优势**：一个会话内多轮工具调用共享上下文，provider 前缀缓存命中——相比旧管线（每文件 + 每 unit 各一次全量无状态大请求）显著省 token
-- **LLM 模型**：`model` 配置（`provider/model`）覆盖，空 = agent 默认模型；无 maxTokens（模型自身输出上限）
+- **LLM 模型**：默认使用 agent 默认模型（`model` 覆盖配置已移除——Dream 会话是普通 agent 对话，无需单独指定）；无 maxTokens（模型自身输出上限）
 - **正文结构**：首行 `# 一句话标题`（与 memory 笔记的 `# 主题` 对齐）+ `##` 小节（procedure: Trigger/Steps/Pre-conditions/Failure modes；personal: Rule/Why/How to apply；wiki: 定义/原则/事实）；不引入更深层级
 - **互链与溯源**：文件尾 `Related: [[digest/...]] — 关系说明` 行（系统维护，只增不删、按 rel 去重）+ `derived_from:: [[memory/...]]` 溯源；原始笔记永不删除；UPDATE 保留旧要点与全部来源
 - **质量 gate**：宁缺毋滥——只提炼可长期复用的抽象（禁止 passing mention/已知概念复述/事件总括/一次性时间戳）；不进 digest 的笔记仍被 `memory_search` 全库检索
@@ -88,8 +88,7 @@ Auto-Memory 无需任何操作：开启后每轮自动提醒，主 agent 自行�
 ```yaml
 dsh-memory:
   searchLimit: 5          # memory_search 默认返回条数（1-10）
-  model: ''               # Dream 模型覆盖，provider/model；留空 = agent 默认模型
-  dreamTime: '23:00'      # Dream 每日触发时间（HH:MM）；留空 = 关闭定时
+  dreamTime: '23:00'      # Dream 每日触发时间（HH:MM）；显式设为 '' = 关闭定时
   embeddingBaseUrl: ''    # Ollama 基地址（如 http://localhost:11434）；留空禁用向量检索
   embeddingModel: 'bge-m3'  # embeddingBaseUrl 提供的嵌入模型名
   autoMemory: true        # 自动记忆开关：每轮 system prompt 提醒；false = 无提醒

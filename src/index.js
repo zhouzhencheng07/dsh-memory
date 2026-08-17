@@ -30,12 +30,13 @@
 //     watermark catalog (digest/.catalog.json, {note rel: mtime}), and if
 //     anything changed launches ONE background agent session through the
 //     agents service (no parent required — the same path dsh-headless uses),
-//     bound to the dream workspace cwd. The session reads the notes and
-//     existing digests with its own tools and writes/updates digest files
-//     under digest/{personal,procedure,wiki}/<topic>.md itself; the plugin
-//     then validates the writes (provenance/Related hygiene, safe paths) and
-//     checkpoints the handled notes in the catalog. The session model follows
-//     the config.model override or the agent default selection.
+//     bound to the dream workspace cwd, mounted on the dedicated `dream`
+//     agent preset (file tools + danger-full-access). The session reads the
+//     notes and existing digests with its own tools and writes/updates digest
+//     files under digest/{personal,procedure,wiki}/<topic>.md itself; the
+//     plugin then validates the writes (provenance/Related hygiene, safe
+//     paths) and checkpoints the handled notes in the catalog. The session
+//     model is the agent default selection (config.model override removed).
 //   - layout (user decision 2026-08-17): one plugin data root
 //     $DSH_HOME/dsh-memory/ holding memory/ (notes), digest/ (refined
 //     library, renamed from the former $DSH_HOME/dream directory), and dream/
@@ -43,9 +44,12 @@
 //     disk untouched for manual comparison but is NOT indexed: all queries
 //     and Dream runs see only the new layout.
 //   - config: `dsh-memory:` section in $DSH_HOME/settings.yaml, hot-reloaded
-//     (searchLimit / model / dreamTime / embeddingBaseUrl / embeddingModel /
+//     (searchLimit / dreamTime / embeddingBaseUrl / embeddingModel /
 //     autoMemory), see README. dreamTime non-empty = Dream timer on;
-//     autoMemory true = per-turn reminder on.
+//     autoMemory true = per-turn reminder on. The Dream model override
+//     (config.model) was REMOVED 2026-08-17: every Dream session now uses the
+//     agent default selection — the `dream` preset session is a normal agent
+//     conversation, and a separate override had no consumer left.
 //
 // Plain ESM JavaScript on purpose. `@deepseek-ai/dsh-tools` and the settings
 // helpers resolve at runtime through Node's parent-walk (the harness installs
@@ -75,8 +79,6 @@ export const inject = ['tools']
 export const Config = z.object({
   /** Default result count for memory_search. */
   searchLimit: z.natural().min(1).max(10).default(5),
-  /** Provider/model override for Dream sessions; empty = the agent default selection. */
-  model: z.string(),
   /** Daily Dream trigger time, HH:MM; non-empty = timer on, empty = off. */
   dreamTime: z.string().default('23:00'),
   /** Ollama base URL for optional vector search (e.g. http://localhost:11434); empty disables it. */
@@ -138,19 +140,21 @@ export function apply(ctx) {
   // ctx.get('settings') at apply time — the service may mount after this
   // plugin activates, and a skipped registration makes settings.mutate fail
   // with "settings namespace ... is not registered".
-  const runtime = {
+  // DEFAULTS mirrors what clearing a user value resolves to; it is reported
+  // to the browser card (GET /dsh-memory/config) so the UI can show the true
+  // default when a field is reset/cleared but not yet saved.
+  const DEFAULTS = {
     searchLimit: 5,
-    model: '',
     dreamTime: '23:00',
     embeddingBaseUrl: '',
     embeddingModel: 'bge-m3',
     autoMemory: true,
   }
+  const runtime = { ...DEFAULTS }
   {
     /** Mirror one resolved source onto the live runtime object. */
     const applySource = (source) => {
       runtime.searchLimit = source.searchLimit
-      runtime.model = source.model ?? ''
       runtime.dreamTime = source.dreamTime
       runtime.embeddingBaseUrl = source.embeddingBaseUrl ?? ''
       runtime.embeddingModel = source.embeddingModel || 'bge-m3'
@@ -255,7 +259,7 @@ export function apply(ctx) {
         if (dreamedToday === today) return
         if (timeStamp(now) !== runtime.dreamTime) return
         dreamedToday = today
-        runDream(ctx, runtime, () => dreamWorkspaceReady)
+        runDream(ctx, () => dreamWorkspaceReady)
           .then((report) => console.log(`dsh-memory dream: ${report.processedDates.length} date(s), session ${report.sessionId ?? 'n/a'}, ${report.changes.length} digest change(s), ${report.errors.length} error(s)`))
           .catch((error) => console.error(`dsh-memory dream failed: ${error?.message ?? String(error)}`))
       } catch (error) {
@@ -268,5 +272,5 @@ export function apply(ctx) {
   // browser configuration card: our own webServer endpoint (the official
   // plugin-configuration surface has a hardcoded api-proxy whitelist this
   // plugin cannot extend; see config-http.js)
-  installConfigEndpoint(ctx, getConfig)
+  installConfigEndpoint(ctx, getConfig, () => DEFAULTS)
 }

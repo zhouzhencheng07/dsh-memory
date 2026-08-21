@@ -129,6 +129,9 @@ function memoryWriteTool() {
       'Upsert one first-level `# ` section into TODAY\'s cross-session memory note for this workspace. ' +
       'The per-turn 【自动记忆】 reminder names this tool as the capture path: call it once per section worth keeping. ' +
       'A new title appends a new section; an existing title is overwritten by content (mode replace, default — use it to correct or update stale notes) or extended with it (mode append). ' +
+      'Before replacing an existing section, read that note first so the replacement keeps what other sessions wrote: ' +
+      'the absolute path is echoed in every result of this tool (' +
+      '$DSH_HOME/dsh-memory/YYYY-MM-DD/<workspace-slug>.md; memory_search hits carry it too), and reading works under every sandbox mode. ' +
       'Content goes in verbatim as markdown (`##`/`###` sub-headings allowed); never include dates/timestamps; ' +
       'the leading provenance comment is maintained automatically.',
     parameters: {

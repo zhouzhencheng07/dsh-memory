@@ -126,12 +126,10 @@ function memoryWriteTool() {
   return {
     name: 'memory_write',
     description:
-      'Upsert one first-level `# ` section into TODAY\'s cross-session memory note for this workspace ' +
-      '($DSH_HOME/dsh-memory/YYYY-MM-DD/<workspace-slug>.md). The plugin host writes the file directly, so this works under EVERY file sandbox mode ' +
-      '(read-only / workspace-write / danger-full-access) — unlike read/edit/write, which cannot touch $DSH_HOME when confined. ' +
-      'The per-turn 【自动记忆】 reminder names this tool as THE memory capture path: judge each turn and call once per section worth keeping. ' +
-      'A new title appends a new section; an existing title is overwritten by content (mode replace, for corrections) or extended with it (mode append). ' +
-      'Content goes in verbatim as markdown (`##`/`###` sub-headings allowed); never include dates/timestamps (the directory carries the date); ' +
+      'Upsert one first-level `# ` section into TODAY\'s cross-session memory note for this workspace. ' +
+      'The per-turn 【自动记忆】 reminder names this tool as the capture path: call it once per section worth keeping. ' +
+      'A new title appends a new section; an existing title is overwritten by content (mode replace, default — use it to correct or update stale notes) or extended with it (mode append). ' +
+      'Content goes in verbatim as markdown (`##`/`###` sub-headings allowed); never include dates/timestamps; ' +
       'the leading provenance comment is maintained automatically.',
     parameters: {
       title: { type: 'string', required: true, description: "First-level `# ` section title (the topic, e.g. 'dsh-kit 文件树 v0.2')" },

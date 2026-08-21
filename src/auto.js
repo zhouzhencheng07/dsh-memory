@@ -33,17 +33,12 @@
 
 /**
  * The per-turn system-prompt reminder (short: it is present on EVERY model
- * request). The agent judges per turn whether anything is worth keeping;
- * writing happens through the memory_write tool, which resolves the daily
- * file, workspace slug and provenance itself.
+ * request). It only names the CAPTURE MOMENT — what is worth keeping and when
+ * to call; how to call lives in the memory_write tool description.
  * @returns {string}
  */
 export function buildMemoryReminder() {
-  return [
-    '【自动记忆】每轮审视本轮内容：有值得跨会话保留的新内容（决策及原因、偏好/纠正/约定、踩坑与修复、可复用命令/流程、当前状态变化）时，调用 memory_write 增量写入今日跨会话记忆（插件宿主侧直写，任何文件沙箱模式下都可用）：',
-    '- 一次一节：title=一级 `#` 标题主题；content=markdown 正文（可用 ## 子标题）。新 title 即新增一节；已有主题过时/需修正时用默认 replace 整节替换；只补充不改动用 mode:\'append\'。',
-    '- 只写尚未覆盖的新内容；关键处逐字引用；正文不写日期/时间戳（目录名已含日期）；首行来源注释由工具自动维护。',
-  ].join('\n')
+  return '【自动记忆】每轮审视本轮内容：有值得跨会话保留的新内容（决策及原因、偏好/纠正/约定、踩坑与修复、可复用命令/流程、当前状态变化）时，调用 memory_write 增量写入今日跨会话记忆；已有记忆过时或错误时更新修正，只写尚未覆盖的新内容。'
 }
 
 /**
@@ -79,7 +74,6 @@ export function installAutoMemory(ctx, getConfig) {
             return buildMemoryReminder()
           },
         })
-        console.log('dsh-memory: auto memory reminder registered (per-turn systemPrompt context, order 200)')
       })
       return () => fiber.dispose()
     }),

@@ -182,39 +182,4 @@ export function apply(ctx) {
   // agent writes the daily memory file with its own read/edit/write tools.
   // No background LLM call, no turn counting, no manual command.
   ctx.effect(() => installAutoMemory(ctx, getConfig))
-
-  installDiagEndpoint(ctx)
-}
-
-// TEMP diagnostics for the settings-card investigation (remove once resolved):
-// the browser half posts its load/apply/snapshot stages here so the server log
-// shows what the client actually did without needing the user's console.
-function installDiagEndpoint(ctx) {
-  ctx.inject(['webServer'], (childCtx) => {
-    childCtx.effect(() => {
-      let disposer
-      try {
-        disposer = childCtx.webServer.register({
-          kind: 'prefix',
-          path: '/dsh-memory-diag',
-          handler: async (req, res) => {
-            const chunks = []
-            req.on('data', (c) => chunks.push(c))
-            req.on('end', () => {
-              try {
-                const body = Buffer.concat(chunks).toString('utf8')
-                console.log(`[dsh-memory-diag] ${body}`)
-              } catch {}
-              res.writeHead(204).end()
-            })
-          },
-        })
-      } catch (error) {
-        console.warn(`[dsh-memory-diag] endpoint registration failed: ${error?.message ?? String(error)}`)
-      }
-      return () => {
-        try { disposer?.() } catch {}
-      }
-    })
-  })
 }

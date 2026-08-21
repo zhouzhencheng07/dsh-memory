@@ -53,6 +53,7 @@ window.__ModuleLoader__.load({
       discard: "Discard",
       unsaved: "Unsaved",
       readOnly: "This deployment stores settings read-only.",
+      loading: "Reading configuration…",
       invalid: "Enter a number, or leave blank to use the default.",
       saveFailed: "The deployment did not accept these values; they were left for you to correct.",
       expand: "Show settings",
@@ -76,6 +77,7 @@ window.__ModuleLoader__.load({
       discard: "放弃修改",
       unsaved: "未保存",
       readOnly: "本部署的设置为只读。",
+      loading: "正在读取配置…",
       invalid: "请填数字；留空表示使用默认值。",
       saveFailed: "本部署没有接受这些值，已保留供你修改。",
       expand: "展开设置",
@@ -151,7 +153,9 @@ window.__ModuleLoader__.load({
 
       react.useEffect(() => scope.subscribe(() => setSnapshot(scope.getSnapshot())), [scope]);
 
-      if (snapshot.status === "loading") return null;
+      // The card shell always renders (loading included): a silently invisible
+      // card is indistinguishable from a registration/pairing failure.
+      const loading = snapshot.status === "loading";
       const title = t("title");
       const available = snapshot.status === "ready";
       const writable = snapshot.writable === true;
@@ -345,7 +349,8 @@ window.__ModuleLoader__.load({
           open ? react_jsx_runtime.jsxs("div", {
             style: styles.body,
             children: [
-              !available ? react_jsx_runtime.jsx("p", { style: styles.readOnly, role: "status", children: t("readOnly") }) : null,
+              loading ? react_jsx_runtime.jsx("p", { style: styles.readOnly, role: "status", children: t("loading") }) : null,
+              !loading && !available ? react_jsx_runtime.jsx("p", { style: styles.readOnly, role: "status", children: t("readOnly") }) : null,
               available && !writable ? react_jsx_runtime.jsx("p", { style: styles.readOnly, role: "status", children: t("readOnly") }) : null,
               available ? FIELDS.map((field, index) => renderField(field, index === 0)) : null,
               available ? react_jsx_runtime.jsxs("div", {
@@ -378,6 +383,10 @@ window.__ModuleLoader__.load({
      * @param ctx - the browser plugin context (slots, settingsScope).
      */
     function apply(ctx) {
+      // version stamp FIRST: its presence/absence in the browser console tells
+      // a missing card apart (module never applied / crashed mid-apply) from an
+      // empty data layer (applied but scope never reached ready)
+      console.info("[dsh-memory] client half applying (v0.2.1, settingsScope channel)");
       // pseudo-class styles the inline style objects cannot express
       // (hover/disabled/focus-visible), injected the same way the official
       // client packages inject their CSS modules

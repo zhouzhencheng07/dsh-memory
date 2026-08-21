@@ -93,7 +93,10 @@ window.__ModuleLoader__.load({
       headText: { flexDirection: "column", flex: 1, gap: 4, minWidth: 0, display: "flex" },
       name: { color: "var(--dsw-alias-label-primary)", fontSize: 15, fontWeight: 600, lineHeight: 1.4 },
       description: { color: "var(--dsw-alias-label-tertiary)", fontSize: 13, lineHeight: 1.5 },
-      pending: { whiteSpace: "nowrap", background: "var(--dsw-alias-bg-module-platform)", color: "var(--dsw-alias-label-secondary)", borderRadius: 999, flex: "none", padding: "1px 8px", fontSize: 11, fontWeight: 500, lineHeight: 17 },
+      // lineHeight MUST be the string "17px": React treats numeric lineHeight
+      // as a UNITLESS property (a font-size multiplier), so 17 meant 17em and
+      // blew the pill up to a ~190px line box
+      pending: { whiteSpace: "nowrap", background: "var(--dsw-alias-bg-module-platform)", color: "var(--dsw-alias-label-secondary)", borderRadius: 999, flex: "none", padding: "1px 8px", fontSize: 11, fontWeight: 500, lineHeight: "17px" },
       chevron: { color: "var(--dsw-alias-label-tertiary)", flex: "none", transition: "transform .16s", display: "block" },
       chevronOpen: { transform: "rotate(180deg)" },
       body: { borderTop: "1px solid var(--dsw-alias-border-l2)", margin: "0 16px", paddingBottom: 8 },
@@ -107,7 +110,7 @@ window.__ModuleLoader__.load({
       // override row must never exceed it regardless of inherited font rules
       badges: { alignItems: "center", gap: 8, display: "inline-flex", flex: "none", height: 19 },
       // the official cards' badge style (solid pill, bg-module-platform)
-      badge: { whiteSpace: "nowrap", background: "var(--dsw-alias-bg-module-platform)", color: "var(--dsw-alias-label-secondary)", borderRadius: 999, padding: "1px 8px", fontSize: 11, fontWeight: 500, lineHeight: 17, height: 19, boxSizing: "border-box", display: "inline-flex", alignItems: "center" },
+      badge: { whiteSpace: "nowrap", background: "var(--dsw-alias-bg-module-platform)", color: "var(--dsw-alias-label-secondary)", borderRadius: 999, padding: "1px 8px", fontSize: 11, fontWeight: 500, lineHeight: "17px", height: 19, boxSizing: "border-box", display: "inline-flex", alignItems: "center" },
       reset: { font: "inherit", color: "var(--dsw-alias-label-secondary)", cursor: "pointer", background: "none", border: "none", padding: 0, fontSize: 12, lineHeight: 1.5, height: 18, boxSizing: "border-box", display: "inline-flex", alignItems: "center" },
       input: { border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-layer-3)", height: 34, font: "inherit", color: "var(--dsw-alias-label-primary)", borderRadius: 8, padding: "0 12px", fontSize: 13, lineHeight: 1.5, width: "100%", boxSizing: "border-box" },
       inputInvalid: { borderColor: "var(--dsw-alias-label-error)" },

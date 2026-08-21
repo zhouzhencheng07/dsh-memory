@@ -7,14 +7,23 @@
 // step is needed: only `react` and `react/jsx-runtime` are required, both
 // shell seed words the official bundles already use.
 //
-// Data channel: the official card machinery (settingsScope) only serves
-// namespaces on an api-proxy whitelist hardcoded in upstream packages, so
-// this card reads and writes through the plugin's OWN webServer endpoint
-// (/dsh-memory/config, registered by the host half). Same-origin fetch, no
-// upstream package touched.
+// Data channel: the OFFICIAL client settings scope. Since dsh rc.7 removed
+// the api-proxy namespace whitelist, any registered namespace can bind
+// ctx.settingsScope.bind({ namespace }) — the same machinery the official
+// cards use: reads ride the shared describe mirror (refreshed on document
+// commits and reconnects), writes carry the latest known revision and fold
+// their answers back in. The earlier hand-rolled /dsh-memory/config HTTP
+// endpoint was removed with this migration.
 //
-// The card stages edits locally and writes them on Save; a rejected write
-// keeps the drafts so the user can correct them.
+// Card conventions mirror the official CardForm (dsh-client-ui-settings-
+// plugins): edits stage locally and write only on Save; a field shows its
+// effective value (user layer over composition base over schema default);
+// "overridden" means presence in the raw user layer, not a value compare;
+// a save that did not land keeps its drafts for the user to correct.
+//
+// The card owns its staging and revision fencing because the bundle purity
+// gate forbids out-of-tree bundles importing the official card chrome and
+// form models as values.
 
 window.__ModuleLoader__.load({
   id: "dsh-memory",
@@ -46,7 +55,6 @@ window.__ModuleLoader__.load({
       readOnly: "This deployment stores settings read-only.",
       invalid: "Enter a number, or leave blank to use the default.",
       saveFailed: "The deployment did not accept these values; they were left for you to correct.",
-      loadFailed: "Could not read the memory configuration.",
       expand: "Show settings",
       collapse: "Hide settings"
     };
@@ -70,205 +78,211 @@ window.__ModuleLoader__.load({
       readOnly: "本部署的设置为只读。",
       invalid: "请填数字；留空表示使用默认值。",
       saveFailed: "本部署没有接受这些值，已保留供你修改。",
-      loadFailed: "无法读取记忆插件配置。",
       expand: "展开设置",
       collapse: "收起设置"
     };
     const lang = typeof navigator !== "undefined" && /^zh/i.test(navigator.language || "") ? zh : en;
     const t = (key) => lang[key] ?? key;
 
-    /** Section fields this card edits: kind is number | bool | text. */
-    const FIELDS = [
-      { field: "searchLimit", kind: "number", label: "searchLimit", hint: "searchLimitHint" },
-      { field: "embeddingBaseUrl", kind: "text", label: "embeddingBaseUrl", hint: "embeddingBaseUrlHint" },
-      { field: "embeddingModel", kind: "text", label: "embeddingModel", hint: "embeddingModelHint" },
-      { field: "autoMemory", kind: "bool", label: "autoMemory", hint: "autoMemoryHint" }
-    ];
-
-    // ── theme-aligned styles (dsw alias tokens, as the official cards use) ──
-    const styles = {
-      card: { border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-layer-3)", borderRadius: 12, listStyle: "none" },
-      cardOpen: { background: "var(--dsw-alias-bg-layer-2)", borderColor: "var(--dsw-alias-label-dimmed)" },
-      header: { appearance: "none", width: "100%", font: "inherit", color: "inherit", textAlign: "left", cursor: "pointer", background: "none", border: 0, borderRadius: 12, alignItems: "center", gap: 12, padding: "14px 16px", display: "flex" },
-      headText: { flexDirection: "column", flex: 1, gap: 4, minWidth: 0, display: "flex" },
-      name: { color: "var(--dsw-alias-label-primary)", fontSize: 15, fontWeight: 600, lineHeight: 1.4 },
-      description: { color: "var(--dsw-alias-label-tertiary)", fontSize: 13, lineHeight: 1.5 },
-      // lineHeight MUST be the string "17px": React treats numeric lineHeight
-      // as a UNITLESS property (a font-size multiplier), so 17 meant 17em and
-      // blew the pill up to a ~190px line box
-      pending: { whiteSpace: "nowrap", background: "var(--dsw-alias-bg-module-platform)", color: "var(--dsw-alias-label-secondary)", borderRadius: 999, flex: "none", padding: "1px 8px", fontSize: 11, fontWeight: 500, lineHeight: "17px" },
-      chevron: { color: "var(--dsw-alias-label-tertiary)", flex: "none", transition: "transform .16s", display: "block" },
-      chevronOpen: { transform: "rotate(180deg)" },
-      body: { borderTop: "1px solid var(--dsw-alias-border-l2)", margin: "0 16px", paddingBottom: 8 },
-      readOnly: { color: "var(--dsw-alias-label-tertiary)", margin: "12px 0 0", fontSize: 12, lineHeight: 1.5 },
-      error: { color: "var(--dsw-alias-label-error)", margin: "12px 0 0", fontSize: 12, lineHeight: 1.5 },
-      field: { flexDirection: "column", gap: 6, padding: "12px 0", display: "flex" },
-      fieldBorder: { borderTop: "1px solid var(--dsw-alias-border-l2)" },
-      head: { alignItems: "center", gap: 8, display: "flex" },
-      label: { minWidth: 0, color: "var(--dsw-alias-label-primary)", flex: 1, fontSize: 13, fontWeight: 500, lineHeight: 1.5 },
-      // badge + reset pin the row height: the label line is 19.5px, so the
-      // override row must never exceed it regardless of inherited font rules
-      badges: { alignItems: "center", gap: 8, display: "inline-flex", flex: "none", height: 19 },
-      // the official cards' badge style (solid pill, bg-module-platform)
-      badge: { whiteSpace: "nowrap", background: "var(--dsw-alias-bg-module-platform)", color: "var(--dsw-alias-label-secondary)", borderRadius: 999, padding: "1px 8px", fontSize: 11, fontWeight: 500, lineHeight: "17px", height: 19, boxSizing: "border-box", display: "inline-flex", alignItems: "center" },
-      reset: { font: "inherit", color: "var(--dsw-alias-label-secondary)", cursor: "pointer", background: "none", border: "none", padding: 0, fontSize: 12, lineHeight: 1.5, height: 18, boxSizing: "border-box", display: "inline-flex", alignItems: "center" },
-      input: { border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-layer-3)", height: 34, font: "inherit", color: "var(--dsw-alias-label-primary)", borderRadius: 8, padding: "0 12px", fontSize: 13, lineHeight: 1.5, width: "100%", boxSizing: "border-box" },
-      inputInvalid: { borderColor: "var(--dsw-alias-label-error)" },
-      checkbox: { width: 16, height: 16, accentColor: "var(--dsw-alias-brand-primary)" },
-      hint: { color: "var(--dsw-alias-label-tertiary)", margin: 0, fontSize: 12, lineHeight: 1.5 },
-      invalidText: { color: "var(--dsw-alias-label-error)", margin: 0, fontSize: 12, lineHeight: 1.5 },
-      footer: { borderTop: "1px solid var(--dsw-alias-border-l2)", justifyContent: "flex-end", alignItems: "center", gap: 8, padding: "12px 0 4px", display: "flex" },
-      failed: { minWidth: 0, color: "var(--dsw-alias-label-error)", flex: 1, margin: 0, fontSize: 12, lineHeight: 1.5 },
-      discardBtn: { appearance: "none", font: "inherit", cursor: "pointer", border: "1px solid var(--dsw-alias-border-l2)", color: "var(--dsw-alias-label-secondary)", background: "none", borderRadius: 8, padding: "5px 14px", fontSize: 13, lineHeight: 1.5 },
-      saveBtn: { appearance: "none", font: "inherit", cursor: "pointer", border: "1px solid transparent", borderRadius: 8, padding: "5px 14px", fontSize: 13, lineHeight: 1.5, background: "var(--dsw-alias-brand-primary)", color: "#fff" },
-      disabled: { opacity: 0.5, cursor: "default" }
-    };
-
-    /** The card's data channel: the host half's /dsh-memory/config endpoint. */
-    const api = {
-      async get() {
-        const res = await fetch("/dsh-memory/config");
-        if (!res.ok) throw new Error(`config read failed (${res.status})`);
-        return res.json();
-      },
-      async update(ops) {
-        const res = await fetch("/dsh-memory/config", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ ops })
-        });
-        if (!res.ok) {
-          let message = `config write failed (${res.status})`;
-          try {
-            const body = await res.json();
-            if (body && typeof body.error === "string") message = body.error;
-          } catch {}
-          throw new Error(message);
+    /**
+     * Field conversion specs, mirroring the official CardForm specs.
+     *
+     * format turns a stored value into control text; parse turns staged text
+     * into a write plan ({kind:'set',value} | {kind:'clear'}), or undefined
+     * when the draft is invalid and must block the save.
+     */
+    const SPECS = {
+      searchLimit: {
+        kind: "number",
+        label: "searchLimit",
+        hint: "searchLimitHint",
+        format: (value) => (typeof value === "number" ? String(value) : ""),
+        parse: (text) => {
+          const trimmed = text.trim();
+          if (trimmed === "") return { kind: "clear" };
+          const parsed = Number(trimmed);
+          return Number.isFinite(parsed) ? { kind: "set", value: parsed } : undefined;
         }
-        return res.json();
+      },
+      embeddingBaseUrl: {
+        kind: "text",
+        label: "embeddingBaseUrl",
+        hint: "embeddingBaseUrlHint",
+        format: (value) => (typeof value === "string" ? value : ""),
+        parse: (text) => {
+          const trimmed = text.trim();
+          return trimmed === "" ? { kind: "clear" } : { kind: "set", value: trimmed };
+        }
+      },
+      embeddingModel: {
+        kind: "text",
+        label: "embeddingModel",
+        hint: "embeddingModelHint",
+        format: (value) => (typeof value === "string" ? value : ""),
+        parse: (text) => {
+          const trimmed = text.trim();
+          return trimmed === "" ? { kind: "clear" } : { kind: "set", value: trimmed };
+        }
+      },
+      // A checkbox never clears: unchecking stores false explicitly, because
+      // clearing would inherit autoMemory's default (true) — the opposite of
+      // what switching it off means.
+      autoMemory: {
+        kind: "bool",
+        label: "autoMemory",
+        hint: "autoMemoryHint",
+        format: (value) => (typeof value === "boolean" ? String(value) : ""),
+        parse: (text) =>
+          text === "true" ? { kind: "set", value: true }
+          : text === "false" ? { kind: "set", value: false }
+          : undefined
       }
     };
+    const FIELDS = ["searchLimit", "embeddingBaseUrl", "embeddingModel", "autoMemory"];
 
-    /**
-     * One plugin's card: a header naming the plugin and what its settings
-     * govern, the staged field controls, and the save that writes them.
-     * @param props - the slot-injected face ({ api }) merged by the renderer.
-     * @returns the card.
-     */
+    /** The card's data channel: the bound scope face injected by apply(). */
     function MemoryCard(props) {
-      const [state, setState] = react.useState({ status: "loading" });
+      const scope = props.scope;
+      const [snapshot, setSnapshot] = react.useState(() => scope.getSnapshot());
       const [drafts, setDrafts] = react.useState({});
       const [saving, setSaving] = react.useState(false);
-      const [failure, setFailure] = react.useState(null);
+      const [failed, setFailed] = react.useState(false);
       const [open, setOpen] = react.useState(false);
 
-      react.useEffect(() => {
-        let alive = true;
-        api.get()
-          .then((snapshot) => { if (alive) setState({ status: "ready", ...snapshot }); })
-          .catch((error) => { if (alive) setState({ status: "error", error: String(error && error.message ? error.message : error) }); });
-        return () => { alive = false; };
-      }, []);
+      react.useEffect(() => scope.subscribe(() => setSnapshot(scope.getSnapshot())), [scope]);
 
-      if (state.status === "loading") return null;
+      if (snapshot.status === "loading") return null;
       const title = t("title");
-      const value = state.value ?? {};
-      const defaults = state.defaults ?? {};
-      const user = state.user;
-      const writable = state.writable === true;
-      const error = state.error;
+      const available = snapshot.status === "ready";
+      const writable = snapshot.writable === true;
 
-      const overridden = (field) => user !== undefined && user !== null && typeof user === "object" && Object.prototype.hasOwnProperty.call(user, field);
+      /** Whether the raw user layer carries the field (the override test). */
+      const stored = (field) =>
+        snapshot.user !== undefined && snapshot.user !== null &&
+        typeof snapshot.user === "object" && Object.prototype.hasOwnProperty.call(snapshot.user, field);
 
-      /** What clearing a field resolves to (the schema default), for display. */
-      const defaultText = (field) => {
-        const d = defaults[field];
-        return d === undefined || d === null ? "" : String(d);
-      };
+      const specOf = (field) => SPECS[field];
 
-      const effective = (field) => {
-        const draft = drafts[field];
-        if (draft !== undefined) return draft.clear ? defaultText(field) : draft.text;
-        const v = value[field];
-        return v === undefined || v === null ? defaultText(field) : String(v);
+      /** The text a control shows with no draft: effective value, formatted. */
+      const sectionText = (field) => specOf(field).format(available ? snapshot.value?.[field] : undefined);
+
+      const stagedOf = (field) => drafts[field];
+
+      /**
+       * One field's display state: staged text wins over the stored value;
+       * while staged, "overridden" previews whether saving would store an
+       * override; an unparseable draft flags invalid.
+       */
+      const fieldState = (field) => {
+        const spec = specOf(field);
+        const staged = stagedOf(field);
+        if (staged === undefined) {
+          return { text: sectionText(field), overridden: stored(field), invalid: false };
+        }
+        const plan = staged.clear ? { kind: "clear" } : spec.parse(staged.text);
+        return {
+          text: staged.text,
+          overridden: plan !== undefined && plan.kind === "set",
+          invalid: plan === undefined
+        };
       };
 
       const edit = (field, text) => {
-        setDrafts((d) => ({ ...d, [field]: { text } }));
-        setFailure(null);
+        setDrafts((d) => ({ ...d, [field]: { text, clear: false } }));
+        setFailed(false);
       };
+      // Reset stages the composition default (base layer), mirroring the
+      // official form; the actual unset happens on Save.
       const resetField = (field) => {
-        setDrafts((d) => ({ ...d, [field]: { clear: true, text: "" } }));
-        setFailure(null);
+        setDrafts((d) => ({ ...d, [field]: { text: specOf(field).format(snapshot.base?.[field]), clear: true } }));
+        setFailed(false);
       };
       const discard = () => {
         setDrafts({});
-        setFailure(null);
+        setFailed(false);
       };
 
-      const specOf = (field) => FIELDS.find((f) => f.field === field);
-      /** Turn one staged draft into a write plan; null = the draft is invalid. */
-      const parse = (spec, draft) => {
-        if (draft.clear) return { kind: "clear" };
-        const text = (draft.text ?? "").trim();
-        if (spec.kind === "number") {
-          if (text === "") return { kind: "clear" };
-          const n = Number(text);
-          if (!Number.isFinite(n)) return null;
-          return { kind: "set", value: n };
+      /**
+       * Every write a save would perform, mirroring the official plan():
+       * no-op drafts are skipped, invalid drafts block the whole save.
+       * @returns array of {run} thunks, or null when a draft is invalid.
+       */
+      const plan = () => {
+        const writes = [];
+        for (const field of FIELDS) {
+          const staged = stagedOf(field);
+          if (staged === undefined) continue;
+          const spec = specOf(field);
+          if (staged.clear) {
+            if (stored(field)) writes.push({ run: () => clearField(field) });
+            continue;
+          }
+          if (staged.text === sectionText(field)) continue;
+          const parsed = spec.parse(staged.text);
+          if (parsed === undefined) return null;
+          if (parsed.kind === "clear") writes.push({ run: () => clearField(field) });
+          else writes.push({ run: () => storeField(field, parsed.value) });
         }
-        if (spec.kind === "bool") return { kind: "set", value: text === "true" };
-        return text === "" ? { kind: "clear" } : { kind: "set", value: text };
+        return writes;
       };
 
-      const dirty = Object.keys(drafts).length > 0;
-      const invalid = Object.entries(drafts).some(([field, draft]) => parse(specOf(field), draft) === null);
+      /**
+       * Write one field and verify it landed by reading the section back:
+       * the Host is the only authority on acceptance, and scope.set/unset
+       * swallow refusals into a recovery re-read by design.
+       */
+      const freshUser = () => scope.getSnapshot().user;
+      const storeField = async (field, value) => {
+        await scope.set(field, value);
+        return freshUser()?.[field] === value;
+      };
+      const clearField = async (field) => {
+        await scope.unset(field);
+        const user = freshUser();
+        return !(user !== undefined && user !== null && typeof user === "object" && Object.hasOwn(user, field));
+      };
+
+      const computeWrites = () => (available ? plan() : []);
+
+      // render-time display state; save() recomputes at click time
+      const writes = computeWrites();
+      const dirty = writes === null || writes.length > 0;
+      const invalid = writes === null;
       const blocked = !dirty || invalid || saving;
 
       const save = async () => {
-        if (blocked) return;
-        const ops = [];
-        for (const [field, draft] of Object.entries(drafts)) {
-          const plan = parse(specOf(field), draft);
-          if (plan === null) return;
-          ops.push(plan.kind === "clear" ? { op: "unset", field } : { op: "set", field, value: plan.value });
-        }
+        // recompute from the latest committed render, and guard double-clicks
+        const freshWrites = computeWrites();
+        if (freshWrites === null || freshWrites.length === 0 || saving) return;
         setSaving(true);
-        setFailure(null);
-        try {
-          await api.update(ops);
-          const fresh = await api.get();
-          setDrafts({});
-          setState({ status: "ready", ...fresh });
-        } catch (err) {
-          setFailure(String(err && err.message ? err.message : err));
-        } finally {
-          setSaving(false);
-        }
+        setFailed(false);
+        let landed = true;
+        for (const write of freshWrites) landed = (await write.run()) && landed;
+        if (landed) setDrafts({});
+        setSaving(false);
+        setFailed(!landed);
       };
 
-      const renderField = (spec, first) => {
-        const field = spec.field;
-        const draft = drafts[field];
-        const text = effective(field);
-        const fieldInvalid = draft !== undefined && parse(spec, draft) === null;
+      const renderField = (field, first) => {
+        const spec = specOf(field);
+        const state = fieldState(field);
         const rowStyle = { ...styles.field, ...(first ? {} : styles.fieldBorder) };
         const control = spec.kind === "bool"
           ? react_jsx_runtime.jsx("input", {
               type: "checkbox",
               style: styles.checkbox,
-              checked: text === "true",
+              checked: state.text === "true",
               disabled: !writable,
-              onChange: () => edit(field, text === "true" ? "false" : "true")
+              onChange: () => edit(field, state.text === "true" ? "false" : "true")
             }, field)
           : react_jsx_runtime.jsx("input", {
               id: `dsh-memory-${field}`,
               className: "dshm-input",
-              style: { ...styles.input, ...(fieldInvalid ? styles.inputInvalid : {}) },
+              style: { ...styles.input, ...(state.invalid ? styles.inputInvalid : {}) },
               type: "text",
               ...(spec.kind === "number" ? { inputMode: "numeric" } : {}),
-              ...(fieldInvalid ? { "aria-invalid": true } : {}),
-              value: text,
+              ...(state.invalid ? { "aria-invalid": true } : {}),
+              value: state.text,
               disabled: !writable,
               onChange: (event) => edit(field, event.target.value)
             }, field);
@@ -279,7 +293,7 @@ window.__ModuleLoader__.load({
               style: styles.head,
               children: [
                 react_jsx_runtime.jsx("label", { style: styles.label, htmlFor: `dsh-memory-${field}`, children: t(spec.label) }),
-                overridden(field) ? react_jsx_runtime.jsxs("span", {
+                state.overridden ? react_jsx_runtime.jsxs("span", {
                   style: styles.badges,
                   children: [
                     react_jsx_runtime.jsx("span", { style: styles.badge, children: t("overridden") }),
@@ -289,7 +303,7 @@ window.__ModuleLoader__.load({
               ]
             }),
             control,
-            react_jsx_runtime.jsx("p", { style: fieldInvalid ? styles.invalidText : styles.hint, children: t(fieldInvalid ? "invalid" : spec.hint) })
+            react_jsx_runtime.jsx("p", { style: state.invalid ? styles.invalidText : styles.hint, children: t(state.invalid ? "invalid" : spec.hint) })
           ]
         }, field);
       };
@@ -331,13 +345,13 @@ window.__ModuleLoader__.load({
           open ? react_jsx_runtime.jsxs("div", {
             style: styles.body,
             children: [
-              error ? react_jsx_runtime.jsx("p", { style: styles.error, role: "status", children: `${t("loadFailed")} ${error}` }) : null,
-              !writable ? react_jsx_runtime.jsx("p", { style: styles.readOnly, role: "status", children: t("readOnly") }) : null,
-              error ? null : FIELDS.map((spec, index) => renderField(spec, index === 0)),
-              error ? null : react_jsx_runtime.jsxs("div", {
+              !available ? react_jsx_runtime.jsx("p", { style: styles.readOnly, role: "status", children: t("readOnly") }) : null,
+              available && !writable ? react_jsx_runtime.jsx("p", { style: styles.readOnly, role: "status", children: t("readOnly") }) : null,
+              available ? FIELDS.map((field, index) => renderField(field, index === 0)) : null,
+              available ? react_jsx_runtime.jsxs("div", {
                 style: styles.footer,
                 children: [
-                  failure ? react_jsx_runtime.jsx("p", { style: styles.failed, role: "status", children: `${t("saveFailed")} ${failure}` }) : null,
+                  failed ? react_jsx_runtime.jsx("p", { style: styles.failed, role: "status", children: t("saveFailed") }) : null,
                   react_jsx_runtime.jsx("button", { type: "button", style: styles.discardBtn, disabled: !dirty || saving, onClick: discard, children: t("discard") }),
                   react_jsx_runtime.jsx("button", {
                     type: "button",
@@ -347,7 +361,7 @@ window.__ModuleLoader__.load({
                     children: t(saving ? "saving" : "save")
                   })
                 ]
-              })
+              }) : null
             ]
           }) : null
         ]
@@ -356,7 +370,12 @@ window.__ModuleLoader__.load({
 
     /**
      * Mount the plugin-configuration card for the dsh-memory namespace.
-     * @param ctx - the browser plugin context (slots).
+     *
+     * The data channel is the official client settings scope bound to our
+     * namespace on THIS plugin's lifecycle (bind() attaches its disposer to
+     * the caller's fiber). Reads ride the shared describe mirror; writes go
+     * out revision-fenced through api.settings.mutate.
+     * @param ctx - the browser plugin context (slots, settingsScope).
      */
     function apply(ctx) {
       // pseudo-class styles the inline style objects cannot express
@@ -373,16 +392,17 @@ window.__ModuleLoader__.load({
         ].join("\n");
         document.head.appendChild(tag);
       }
+      const scope = ctx.settingsScope.bind({ namespace: "dsh-memory" });
       ctx.slots.inject("settings.plugin.item", () => ctx.slots.register({
         name: "settings.plugin.item",
         key: "dsh-memory",
         id: "dsh-memory",
         order: 30,
-        inject: () => ({ api })
+        inject: () => ({ scope })
       }, MemoryCard));
     }
 
-    exports.inject = ["slots"];
+    exports.inject = ["slots", "settingsScope"];
     exports.apply = apply;
     return module.exports;
   }

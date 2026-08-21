@@ -5,8 +5,7 @@
 //
 // Design (agreed with the user, 2026-08-16/17/18):
 //   - memory = reusable experience reference (decisions, pitfalls, ideas),
-//     NOT a project archive; project detail lives in the project's AGENTS.md
-//     and project docs.
+//     NOT a project archive; project detail lives in the workspace docs.
 //   - retrieval: memory_search over the daily notes (block-level, substring +
 //     optional vector, recency-weighted). The digest/dream layer was REMOVED
 //     (2026-08-18, user decision): memory notes are edited in place and carry
@@ -35,22 +34,28 @@
 // them in the profile fallback node_modules).
 
 import z from '@deepseek-ai/schemastery'
-import { installSettingsSection } from '@deepseek-ai/dsh-settings'
+import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { installAutoMemory } from './auto.js'
 import { walkMemory } from './store.js'
 import { formatHits, fuseHits, searchMemory } from './search.js'
 import { EmbeddingClient, VectorIndex } from './embed.js'
-import { NS, installConfigEndpoint } from './config-http.js'
 
 export const name = 'dsh-memory'
+
+/** Settings namespace of this plugin; its registration is what makes the
+ * browser card appear in the Plugins settings section (the card half lives
+ * in client/bundle.js and binds ctx.settingsScope to this namespace). */
+const NS = settingsNamespace('dsh-memory')
 
 export const inject = ['tools']
 
 /**
  * Plugin configuration, editable through the `dsh-memory:` section of
  * $DSH_HOME/settings.yaml (hot-reloaded, no restart needed).
- * Schema rules (schemastery, NOT zod) live in this directory's AGENTS.md.
+ * Schema notes: `z` is @deepseek-ai/schemastery (Koishi), NOT zod — no
+ * `.integer()` / `.optional()` / `.nullable()`; use `.natural()`, `.min()`,
+ * `.max()` and plain defaults (a field without `.required()` is optional).
  */
 export const Config = z.object({
   /** Default result count for memory_search. */
@@ -116,9 +121,6 @@ export function apply(ctx) {
   // ctx.get('settings') at apply time — the service may mount after this
   // plugin activates, and a skipped registration makes settings.mutate fail
   // with "settings namespace ... is not registered".
-  // DEFAULTS mirrors what clearing a user value resolves to; it is reported
-  // to the browser card (GET /dsh-memory/config) so the UI can show the true
-  // default when a field is reset/cleared but not yet saved.
   const DEFAULTS = {
     searchLimit: 5,
     embeddingBaseUrl: '',
@@ -180,9 +182,4 @@ export function apply(ctx) {
   // agent writes the daily memory file with its own read/edit/write tools.
   // No background LLM call, no turn counting, no manual command.
   ctx.effect(() => installAutoMemory(ctx, getConfig))
-
-  // browser configuration card: our own webServer endpoint (the official
-  // plugin-configuration surface has a hardcoded api-proxy whitelist this
-  // plugin cannot extend; see config-http.js)
-  installConfigEndpoint(ctx, getConfig, () => DEFAULTS)
 }

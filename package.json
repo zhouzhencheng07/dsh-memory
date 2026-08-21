@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Cross-session memory for DeepSeek Harness (dsh): background Auto-Memory, per-workspace daily notes, memory search, and optional vector search",
   "license": "MIT",
   "type": "module",
@@ -15,6 +15,7 @@
     "client",
     "cordis.patch.yml",
     "README.md",
+    "README.en.md",
     "LICENSE"
   ],
   "keywords": [
@@ -30,7 +31,8 @@
     "client": {
       "platform": "web",
       "inject": [
-        "slots"
+        "slots",
+        "settingsScope"
       ]
     }
   }

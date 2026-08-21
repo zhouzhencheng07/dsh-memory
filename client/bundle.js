@@ -156,6 +156,48 @@ window.__ModuleLoader__.load({
     };
     const FIELDS = ["searchLimit", "embeddingBaseUrl", "embeddingModel", "autoMemory"];
 
+    // ── theme-aligned styles (dsw alias tokens, as the official cards use) ──
+    // (dropped during the migration rewrite once — the card then crashed every
+    // render with "styles is not defined" and the slot renderer swallowed it,
+    // leaving the card silently invisible; restored from git history)
+    const styles = {
+      card: { border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-layer-3)", borderRadius: 12, listStyle: "none" },
+      cardOpen: { background: "var(--dsw-alias-bg-layer-2)", borderColor: "var(--dsw-alias-label-dimmed)" },
+      header: { appearance: "none", width: "100%", font: "inherit", color: "inherit", textAlign: "left", cursor: "pointer", background: "none", border: 0, borderRadius: 12, alignItems: "center", gap: 12, padding: "14px 16px", display: "flex" },
+      headText: { flexDirection: "column", flex: 1, gap: 4, minWidth: 0, display: "flex" },
+      name: { color: "var(--dsw-alias-label-primary)", fontSize: 15, fontWeight: 600, lineHeight: 1.4 },
+      description: { color: "var(--dsw-alias-label-tertiary)", fontSize: 13, lineHeight: 1.5 },
+      // lineHeight MUST be the string "17px": React treats numeric lineHeight
+      // as a UNITLESS property (a font-size multiplier), so 17 meant 17em and
+      // blew the pill up to a ~190px line box
+      pending: { whiteSpace: "nowrap", background: "var(--dsw-alias-bg-module-platform)", color: "var(--dsw-alias-label-secondary)", borderRadius: 999, flex: "none", padding: "1px 8px", fontSize: 11, fontWeight: 500, lineHeight: "17px" },
+      chevron: { color: "var(--dsw-alias-label-tertiary)", flex: "none", transition: "transform .16s", display: "block" },
+      chevronOpen: { transform: "rotate(180deg)" },
+      body: { borderTop: "1px solid var(--dsw-alias-border-l2)", margin: "0 16px", paddingBottom: 8 },
+      readOnly: { color: "var(--dsw-alias-label-tertiary)", margin: "12px 0 0", fontSize: 12, lineHeight: 1.5 },
+      error: { color: "var(--dsw-alias-label-error)", margin: "12px 0 0", fontSize: 12, lineHeight: 1.5 },
+      field: { flexDirection: "column", gap: 6, padding: "12px 0", display: "flex" },
+      fieldBorder: { borderTop: "1px solid var(--dsw-alias-border-l2)" },
+      head: { alignItems: "center", gap: 8, display: "flex" },
+      label: { minWidth: 0, color: "var(--dsw-alias-label-primary)", flex: 1, fontSize: 13, fontWeight: 500, lineHeight: 1.5 },
+      // badge + reset pin the row height: the label line is 19.5px, so the
+      // override row must never exceed it regardless of inherited font rules
+      badges: { alignItems: "center", gap: 8, display: "inline-flex", flex: "none", height: 19 },
+      // the official cards' badge style (solid pill, bg-module-platform)
+      badge: { whiteSpace: "nowrap", background: "var(--dsw-alias-bg-module-platform)", color: "var(--dsw-alias-label-secondary)", borderRadius: 999, padding: "1px 8px", fontSize: 11, fontWeight: 500, lineHeight: "17px", height: 19, boxSizing: "border-box", display: "inline-flex", alignItems: "center" },
+      reset: { font: "inherit", color: "var(--dsw-alias-label-secondary)", cursor: "pointer", background: "none", border: "none", padding: 0, fontSize: 12, lineHeight: 1.5, height: 18, boxSizing: "border-box", display: "inline-flex", alignItems: "center" },
+      input: { border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-layer-3)", height: 34, font: "inherit", color: "var(--dsw-alias-label-primary)", borderRadius: 8, padding: "0 12px", fontSize: 13, lineHeight: 1.5, width: "100%", boxSizing: "border-box" },
+      inputInvalid: { borderColor: "var(--dsw-alias-label-error)" },
+      checkbox: { width: 16, height: 16, accentColor: "var(--dsw-alias-brand-primary)" },
+      hint: { color: "var(--dsw-alias-label-tertiary)", margin: 0, fontSize: 12, lineHeight: 1.5 },
+      invalidText: { color: "var(--dsw-alias-label-error)", margin: 0, fontSize: 12, lineHeight: 1.5 },
+      footer: { borderTop: "1px solid var(--dsw-alias-border-l2)", justifyContent: "flex-end", alignItems: "center", gap: 8, padding: "12px 0 4px", display: "flex" },
+      failed: { minWidth: 0, color: "var(--dsw-alias-label-error)", flex: 1, margin: 0, fontSize: 12, lineHeight: 1.5 },
+      discardBtn: { appearance: "none", font: "inherit", cursor: "pointer", border: "1px solid var(--dsw-alias-border-l2)", color: "var(--dsw-alias-label-secondary)", background: "none", borderRadius: 8, padding: "5px 14px", fontSize: 13, lineHeight: 1.5 },
+      saveBtn: { appearance: "none", font: "inherit", cursor: "pointer", border: "1px solid transparent", borderRadius: 8, padding: "5px 14px", fontSize: 13, lineHeight: 1.5, background: "var(--dsw-alias-brand-primary)", color: "#fff" },
+      disabled: { opacity: 0.5, cursor: "default" }
+    };
+
     /** The card's data channel: the bound scope face injected by apply(). */
     function MemoryCard(props) {
       const scope = props.scope;
@@ -178,6 +220,17 @@ window.__ModuleLoader__.load({
         });
       }, [scope]);
 
+      // The card shell always renders (loading included): a silently invisible
+      // card is indistinguishable from a registration/pairing failure.
+      try {
+        return renderCard();
+      } catch (error) {
+        // a crash during render never reaches the effect above, so report here
+        report("render-error", { message: String(error && error.message ? error.message : error), stack: String(error && error.stack ? error.stack : "").slice(0, 500) });
+        return react_jsx_runtime.jsx("li", { style: styles.card, children: react_jsx_runtime.jsx("div", { style: styles.body, children: react_jsx_runtime.jsx("p", { style: styles.error, role: "status", children: `dsh-memory card render error: ${String(error && error.message ? error.message : error)}` }) }) });
+      }
+
+      function renderCard() {
       // The card shell always renders (loading included): a silently invisible
       // card is indistinguishable from a registration/pairing failure.
       const loading = snapshot.status === "loading";
@@ -396,6 +449,9 @@ window.__ModuleLoader__.load({
           }) : null
         ]
       });
+      }
+
+      // renderCard end
     }
 
     /**
@@ -436,6 +492,22 @@ window.__ModuleLoader__.load({
         order: 30,
         inject: () => ({ scope })
       }, MemoryCard));
+      // TEMP probe: dump the page's OWN view of the two ledgers the
+      // configurable tab pairs — the shared mirror's served namespaces and the
+      // registered card keys. This is what decides whether our card renders.
+      const probe = (tag) => {
+        try {
+          const mirror = ctx.settingsScope.describe().getSnapshot();
+          const served = mirror.view?.namespaces?.map((row) => row.ns) ?? null;
+          const cards = ctx.slots.entries("settings.plugin.item").map((e) => e.options?.key ?? e.options?.id ?? "?");
+          report("probe", { tag, mirrorStatus: mirror.status, served, cards });
+        } catch (error) {
+          report("probe-error", { tag, message: String(error && error.message ? error.message : error) });
+        }
+      };
+      probe("apply");
+      setTimeout(() => probe("t2s"), 2000);
+      setTimeout(() => probe("t8s"), 8000);
       report("apply-ok");
       } catch (error) {
         report("apply-error", { message: String(error && error.message ? error.message : error), stack: String(error && error.stack ? error.stack : "") });

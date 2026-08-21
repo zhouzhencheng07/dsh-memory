@@ -27,8 +27,17 @@
 //     same title replaces (or appends to) the section, a new title appends a
 //     new section. No timestamps, no dates in headings (the date already
 //     lives in the directory name).
+//   - the leading provenance comment (`<!-- 会话来源: session-a, ... -->`)
+//     before the first `# ` heading is PRESERVED across rewrites and new
+//     session ids are merged into it (multi-session parallel capture).
 //   - atomic: temp file + rename, so a crash never leaves a torn note.
 //   - serialized through one in-process write queue.
+//
+// memory_write (2026-08-22): the model-facing write tool calls upsertSections
+// from the plugin HOST process — node:fs direct, never through ctx.fs — so
+// memory capture works identically under read-only / workspace-write /
+// danger-full-access with no sandbox escalation (the agent's own fs tools can
+// only touch $DSH_HOME under danger-full-access).
 //
 // Historical per-topic files (YYYY-MM-DD/<topic>.md) are still read by
 // walkMemory; appendNote() remains for compatibility with old writers.
@@ -163,15 +172,63 @@ export function parseSections(text) {
 }
 
 /**
+ * Split the leading preamble (everything before the first `# ` heading line —
+ * in practice the provenance comment) off a memory file's text.
+ * @param {string} text
+ * @returns {{preamble: string, body: string}}
+ */
+export function splitPreamble(text) {
+  const lines = String(text ?? '').split('\n')
+  let cut = 0
+  while (cut < lines.length && !/^#\s/.test(lines[cut])) cut += 1
+  return { preamble: lines.slice(0, cut).join('\n').trim(), body: lines.slice(cut).join('\n') }
+}
+
+const SOURCE_COMMENT = /^<!--\s*会话来源:\s*(.*?)\s*-->$/
+
+/**
+ * Merge one session id into the leading provenance comment(s): existing
+ * `<!-- 会话来源: ... -->` lines are collapsed into ONE comment carrying all
+ * ids in first-seen order (new id appended when missing); any other preamble
+ * lines survive above it.
+ * @param {string} preamble - current preamble text ('' when none)
+ * @param {string} sessionId
+ * @returns {string}
+ */
+export function mergeSourceComment(preamble, sessionId) {
+  const id = String(sessionId ?? '').trim()
+  const rest = []
+  const ids = []
+  for (const line of String(preamble ?? '').split('\n')) {
+    const m = SOURCE_COMMENT.exec(line.trim())
+    if (!m) {
+      if (line.trim()) rest.push(line.trim())
+      continue
+    }
+    for (const part of m[1].split(',')) {
+      const known = part.trim()
+      if (known && !ids.includes(known)) ids.push(known)
+    }
+  }
+  if (id && !ids.includes(id)) ids.push(id)
+  if (ids.length === 0) return rest.join('\n')
+  const comment = `<!-- 会话来源: ${ids.join(', ')} -->`
+  return rest.length > 0 ? `${rest.join('\n')}\n${comment}` : comment
+}
+
+/**
  * Upsert `# ` sections into `<date>/<slug>.md`.
  * @param {string} date - YYYY-MM-DD
  * @param {string} slug - workspace slug (see sessionSlug)
  * @param {Array<{title: string, content: string, mode?: 'replace'|'append'}>} ops
  *   replace (default): section body becomes `content` (a new title appends);
  *   append: `content` is appended to the existing section body.
+ * @param {object} [opts]
+ * @param {string} [opts.sourceSessionId] - merged into the leading
+ *   `<!-- 会话来源: ... -->` comment; creating a file plants it as line one.
  * @returns {Promise<{file: string, created: boolean, changed: boolean, sections: number}>}
  */
-export async function upsertSections(date, slug, ops) {
+export async function upsertSections(date, slug, ops, opts = {}) {
   const file = join(memoryRoot(), date, `${slug}.md`)
   const clean = (Array.isArray(ops) ? ops : []).filter(
     (op) => op && typeof op.title === 'string' && op.title.trim(),
@@ -180,7 +237,8 @@ export async function upsertSections(date, slug, ops) {
   return serialized(() => {
     const existed = existsSync(file) && statSync(file).size > 0
     const oldText = existed ? readFileSync(file, 'utf8') : ''
-    const sections = parseSections(oldText)
+    const { preamble, body } = splitPreamble(oldText)
+    const sections = parseSections(body)
     let changed = false
     for (const op of clean) {
       const title = op.title.trim()
@@ -199,10 +257,14 @@ export async function upsertSections(date, slug, ops) {
         changed = true
       }
     }
+    const nextPreamble = opts.sourceSessionId ? mergeSourceComment(preamble, opts.sourceSessionId) : preamble
+    if (nextPreamble !== preamble) changed = true
     if (!changed) return { file, created: !existed, changed: false, sections: sections.length }
-    const body = sections.map((s) => `# ${s.title}\n\n${s.body}`).join('\n\n')
+    const out = [nextPreamble, sections.map((s) => `# ${s.title}\n\n${s.body}`).join('\n\n')]
+      .filter((part) => part.length > 0)
+      .join('\n\n')
     ensureDir(join(file, '..'))
-    writeFileSync(file, `${body}\n`, 'utf8')
+    writeFileSync(file, `${out}\n`, 'utf8')
     return { file, created: !existed, changed: true, sections: sections.length }
   })
 }

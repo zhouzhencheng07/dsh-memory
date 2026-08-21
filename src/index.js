@@ -16,15 +16,17 @@
 //   - memory is written by the MAIN AGENT inside the conversation: while
 //     autoMemory is on, the plugin contributes a system-prompt section
 //     (assembled fresh per request) that reminds the agent every turn to
-//     judge and, when worth it, incrementally write the workspace daily
-//     memory file with its own read/edit/write tools (write only when the
-//     file does not exist; edit otherwise). The daily path is computed at
-//     assembly time, so crossing midnight switches days on its own — no turn
-//     counting. No background LLM call, no dedicated write tool, no manual
-//     command (the per-turn reminder IS the capture path). (A background
-//     pipeline was tried and failed: hand-built requests broke provider
-//     pairing -> 400, and reasoning-max models answered nothing. The
-//     conversation loop assembles valid requests.)
+//     judge and, when worth it, capture via the host-side `memory_write`
+//     tool (upserts one `# ` section into the workspace daily memory file).
+//     The daily path is computed at assembly time, so crossing midnight
+//     switches days on its own — no turn counting. No background LLM call,
+//     no manual command (the per-turn reminder IS the capture path).
+//     (2026-08-22, user decision: the original "agent writes with its own
+//     read/edit/write tools" design died on the sandbox — $DSH_HOME sits
+//     outside the session workspace, so workspace-write denied every write
+//     and approval=never removed the escalation path. memory_write executes
+//     in the plugin host process over node:fs, never through ctx.fs, so all
+//     three sandbox modes behave identically.)
 //   - config: `dsh-memory:` section in $DSH_HOME/settings.yaml, hot-reloaded
 //     (searchLimit / embeddingBaseUrl / embeddingModel / autoMemory), see
 //     README.
@@ -37,7 +39,7 @@ import z from '@deepseek-ai/schemastery'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { installAutoMemory } from './auto.js'
-import { walkMemory } from './store.js'
+import { sessionSlug, todayStamp, upsertSections, walkMemory } from './store.js'
 import { formatHits, fuseHits, searchMemory } from './search.js'
 import { EmbeddingClient, VectorIndex } from './embed.js'
 
@@ -114,6 +116,51 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
   }
 }
 
+/**
+ * The model-facing capture path: upserts one `# ` section into today's daily
+ * memory file. Executes in the plugin host process (node:fs via store.js,
+ * never through ctx.fs), so it is unaffected by the agent file sandbox — the
+ * whole reason it exists (2026-08-22).
+ */
+function memoryWriteTool() {
+  return {
+    name: 'memory_write',
+    description:
+      'Upsert one first-level `# ` section into TODAY\'s cross-session memory note for this workspace ' +
+      '($DSH_HOME/dsh-memory/YYYY-MM-DD/<workspace-slug>.md). The plugin host writes the file directly, so this works under EVERY file sandbox mode ' +
+      '(read-only / workspace-write / danger-full-access) — unlike read/edit/write, which cannot touch $DSH_HOME when confined. ' +
+      'The per-turn 【自动记忆】 reminder names this tool as THE memory capture path: judge each turn and call once per section worth keeping. ' +
+      'A new title appends a new section; an existing title is overwritten by content (mode replace, for corrections) or extended with it (mode append). ' +
+      'Content goes in verbatim as markdown (`##`/`###` sub-headings allowed); never include dates/timestamps (the directory carries the date); ' +
+      'the leading provenance comment is maintained automatically.',
+    parameters: {
+      title: { type: 'string', required: true, description: "First-level `# ` section title (the topic, e.g. 'dsh-kit 文件树 v0.2')" },
+      content: { type: 'string', required: true, description: 'Markdown body of the section; may contain ## sub-headings; verbatim, no dates/timestamps' },
+      mode: { type: 'string', description: "'replace' (default): overwrite the existing section body with content; 'append': add content to its end" },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args, exec) {
+      const title = String(args.title ?? '').trim()
+      const content = String(args.content ?? '').trim()
+      if (!title) throw new Error('memory_write: title is empty')
+      if (!content) throw new Error('memory_write: content is empty')
+      const mode = args.mode === 'append' ? 'append' : 'replace'
+      const session = exec?.agent?.session
+      const result = await upsertSections(
+        todayStamp(),
+        sessionSlug(session?.header?.cwd),
+        [{ title, content, mode }],
+        { sourceSessionId: session?.id },
+      )
+      const action = result.created ? 'created' : result.changed ? mode + 'd' : 'unchanged'
+      return `${result.file} · # ${title} · ${action} (${result.sections} sections)`
+    },
+  }
+}
+
 export function apply(ctx) {
   // runtime configuration: seeded with schema defaults, then driven by the
   // `dsh-memory:` section of settings.yaml (hot-reloaded). installSettingsSection
@@ -169,9 +216,11 @@ export function apply(ctx) {
     return vectorIndex
   }
 
-  // the only model tool is memory_search (no Dream layer since 2026-08-18).
+  // Model tools: memory_search (retrieval) + memory_write (the capture path —
+  // host-side write, sandbox-proof since 2026-08-22; no Dream layer).
   const tools = [
     memorySearchTool(ctx, getConfig, getVectorIndex),
+    memoryWriteTool(),
   ]
   for (const tool of tools) {
     if (tool === undefined) continue

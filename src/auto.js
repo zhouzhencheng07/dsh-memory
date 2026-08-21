@@ -4,12 +4,19 @@
 // 2026-08-17): while `autoMemory` is on, the plugin contributes a
 // system-prompt section assembled FRESH on every model request; the main
 // agent itself decides each turn whether anything worth keeping happened
-// and, when it did, writes it incrementally with its own read/edit/write
-// tools (write only when the file does not exist; edit otherwise). The daily
-// file path is computed at assembly time, so a session spanning midnight
-// switches to the new day's file automatically — no watermark, no cross-day
-// staleness, no turn bookkeeping. `autoMemory: false` removes the section;
-// the /memory command is gone (the per-turn reminder IS the capture path).
+// and, when it did, captures it through the host-side `memory_write` tool.
+// The daily file/date is resolved inside the tool at EXECUTE time, so a
+// session spanning midnight switches to the new day's file automatically —
+// no watermark, no cross-day staleness, no turn bookkeeping.
+// `autoMemory: false` removes the section; the /memory command is gone (the
+// per-turn reminder IS the capture path).
+//
+// 2026-08-22: the capture path changed from "agent writes the daily file
+// with its own read/edit/write tools" to `memory_write` (user decision).
+// Reason: $DSH_HOME/dsh-memory sits outside the session workspace, so under
+// workspace-write every direct write was denied by the DSH file sandbox and
+// approval=never removed the escalation path. memory_write executes in the
+// plugin host process over node:fs — identical behavior in all three modes.
 //
 // Why not a background LLM call (two live failures): hand-built requests
 // forwarding message objects broke provider tool-call/tool-result pairing
@@ -24,27 +31,18 @@
 // plus a recency decay, so converging "the current state of a convention"
 // happens at query time instead of in a nightly background session.
 
-import { join } from 'node:path'
-import { memoryRoot, sessionSlug, todayStamp } from './store.js'
-
-/** Today's daily memory file for one session (assembly-time fresh). */
-const memoryFileFor = (session) =>
-  join(memoryRoot(), todayStamp(), `${sessionSlug(session.header?.cwd)}.md`)
-
 /**
  * The per-turn system-prompt reminder (short: it is present on EVERY model
  * request). The agent judges per turn whether anything is worth keeping;
- * writing happens with its own read/edit/write tools.
- * @param {string} file - today's daily memory file
- * @param {string} sessionId - source session id (for the provenance line)
+ * writing happens through the memory_write tool, which resolves the daily
+ * file, workspace slug and provenance itself.
  * @returns {string}
  */
-export function buildMemoryReminder(file, sessionId) {
+export function buildMemoryReminder() {
   return [
-    '【自动记忆】每轮审视本轮内容：有值得跨会话保留的新内容（决策及原因、偏好/纠正/约定、踩坑与修复、可复用命令/流程、当前状态变化）时，增量写入今日记忆文件 ' + file + '：',
-    '- 文件不存在 → write 新建；已存在 → 只用 edit 精确修改（禁止整体 write 覆盖）。',
-    '- 只写尚未覆盖的新内容；已有内容过时或错误时更新修正；关键处逐字引用；用正常 markdown 多级标题组织；全文不写日期/时间戳。',
-    '- 首行维护来源注释 <!-- 会话来源: ' + sessionId + ' -->（多会话并列追加）。',
+    '【自动记忆】每轮审视本轮内容：有值得跨会话保留的新内容（决策及原因、偏好/纠正/约定、踩坑与修复、可复用命令/流程、当前状态变化）时，调用 memory_write 增量写入今日跨会话记忆（插件宿主侧直写，任何文件沙箱模式下都可用）：',
+    '- 一次一节：title=一级 `#` 标题主题；content=markdown 正文（可用 ## 子标题）。新 title 即新增一节；已有主题过时/需修正时用默认 replace 整节替换；只补充不改动用 mode:\'append\'。',
+    '- 只写尚未覆盖的新内容；关键处逐字引用；正文不写日期/时间戳（目录名已含日期）；首行来源注释由工具自动维护。',
   ].join('\n')
 }
 
@@ -78,7 +76,7 @@ export function installAutoMemory(ctx, getConfig) {
             // Sub-agents (delegationDepth > 0) are excluded: their memory
             // belongs to the main agent's consolidation.
             if ((session.header?.delegationDepth ?? 0) > 0) return ''
-            return buildMemoryReminder(memoryFileFor(session), session.id)
+            return buildMemoryReminder()
           },
         })
         console.log('dsh-memory: auto memory reminder registered (per-turn systemPrompt context, order 200)')

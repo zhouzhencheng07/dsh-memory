@@ -6,23 +6,26 @@ A cross-session global memory plugin for DeepSeek Harness (dsh).
 
 On every model request the main agent receives an auto-memory reminder in the
 system prompt, decides whether this turn produced anything worth keeping across
-sessions, and **incrementally writes** a daily memory note; the `memory_search`
-tool retrieves those notes with **block-level search** (optional vector fusion,
-per-day recency decay). Ships as a bundle plugin (`dsh.bundle`) — 0 patches,
-**zero npm dependencies, zero build step**; `@deepseek-ai/*` resolves through
-dsh's flat module fallback, so the runtime shares one package instance.
+sessions, and upserts it into a daily memory note through the **`memory_write`
+tool** (written directly by the plugin host, so it works under every file
+sandbox mode); the `memory_search` tool retrieves those notes with
+**block-level search** (optional vector fusion, per-day recency decay). Ships
+as a bundle plugin (`dsh.bundle`) — 0 patches, **zero npm dependencies, zero
+build step**; `@deepseek-ai/*` resolves through dsh's flat module fallback, so
+the runtime shares one package instance.
 
 ## Features
 
 | Feature | Description |
 |---|---|
-| **Auto-Memory** | Injects a memory reminder into the system prompt every turn (`dsh-memory:auto`, order 200); the main agent curates notes with dsh's built-in read/edit/write; sub-agents are not reminded; `autoMemory: false` turns it off instantly |
+| **Auto-Memory** | Injects a memory reminder into the system prompt every turn (`dsh-memory:auto`, order 200); the main agent captures via the `memory_write` tool; sub-agents are not reminded; `autoMemory: false` turns it off instantly |
 | **memory_search tool** | Heading-aware block-level retrieval (any heading splits a block, breadcrumbs included), length-normalized substring matching (CJK-friendly), **per-day decay** (30-day half-life, floor 0.4 — older notes rank lower but never vanish), snippets return whole blocks (≤1000 chars, usually no need to open the file) |
+| **memory_write tool** | Upserts one first-level `#` topic section into today's workspace memory note (new title appends; existing titles get replaced or appended to); executes inside the plugin host process, so **read-only / workspace-write / danger-full-access all behave identically with no escalation**; the leading `<!-- 会话来源: ... -->` provenance comment is maintained automatically (session ids merged) |
 | **Vector fusion (optional)** | With an Ollama-compatible embedding service configured, upgrades automatically to substring + vector RRF fusion (k=60); falls back to pure substring when the service is down — `memory_search` never fails because of vectors |
 | **Config card** | Settings → Plugins → Plugin config → Memory; hot-reloads on save (persisted to settings.yaml, no restart) |
 
-No commands — writing happens via the per-turn reminder, retrieval via the
-`memory_search` tool.
+No commands — writing happens via the per-turn reminder plus the `memory_write`
+tool, retrieval via the `memory_search` tool.
 
 ## Storage layout
 
@@ -35,8 +38,9 @@ $DSH_HOME/dsh-memory/
     └── <workspace-slug>.md   # one file per workspace per day, normal markdown headings
 ```
 
-- **No state files**: no watermarks or turn counters; the date is taken at
-  assembly time and rolls over to the new day's file automatically at midnight
+- **No state files**: no watermarks or turn counters; the date is resolved when
+  `memory_write` executes and rolls over to the new day's file automatically at
+  midnight
 - rel paths carry the date, so every hit's age is visible at a glance
 
 ## Install
@@ -66,9 +70,8 @@ dsh plugin --profile web add "file:/path/to/dsh-memory"
 ## How it works
 
 - `src/auto.js`: Auto-Memory — registers a system prompt context (order 200)
-  re-evaluated on every request assembly; the reminder's file path uses today's
-  date; the main agent writes or skips on its own — no background LLM calls, no
-  watermark, no retries
+  re-evaluated on every request assembly; the main agent calls `memory_write`
+  or skips on its own — no background LLM calls, no watermark, no retries
 - `src/search.js`: any heading (`#`–`######`) is a chunk boundary and
   subsections become standalone blocks with ancestor breadcrumbs;
   case-insensitive substring hits normalized by block length; each block's
@@ -78,6 +81,7 @@ dsh plugin --profile web add "file:/path/to/dsh-memory"
   caching (unchanged files are never re-embedded), cosine ≥ 0.45 joins the
   fusion, RRF k=60; embedding model defaults to `bge-m3`
 - `src/store.js`: reads/writes the daily notes under `$DSH_HOME/dsh-memory/`
+  (section-level upsert, provenance-comment merging, in-process write queue)
 - `client/bundle.js`: hand-written client bundle registering into the
   `settings.plugin.item` keyed slot (`key: 'dsh-memory'`); reads and writes go
   through the official client settings scope (`ctx.settingsScope.bind`) —
@@ -93,10 +97,13 @@ dsh plugin --profile web add "file:/path/to/dsh-memory"
 ```sh
 # model-side tool: search the memory library (older notes rank lower but stay reachable)
 memory_search query="vector search threshold"
+
+# model-side tool: write today's memory (the per-turn reminder's target; sandbox-proof)
+memory_write title="Topic" content="- point ……" mode="replace"
 ```
 
 Auto-Memory needs no action: once enabled, every turn gets the reminder and the
-main agent decides what to write.
+main agent decides what to capture via `memory_write`.
 
 ## Configuration
 

@@ -34,6 +34,20 @@ window.__ModuleLoader__.load({
     let react = require("react");
     let react_jsx_runtime = require("react/jsx-runtime");
 
+    // TEMP diagnostics (remove with the host /dsh-memory-diag endpoint): the
+    // browser half self-reports its load/apply/snapshot stages into the server
+    // log, so a missing card is diagnosable without the user's console.
+    const report = (stage, extra) => {
+      try {
+        fetch("/dsh-memory-diag", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ stage, t: Date.now(), ...extra })
+        }).catch(() => {});
+      } catch {}
+    };
+    report("factory-executed");
+
     // ── locale copy ──────────────────────────────────────────────────────────
     const en = {
       title: "Memory (dsh-memory)",
@@ -151,7 +165,18 @@ window.__ModuleLoader__.load({
       const [failed, setFailed] = react.useState(false);
       const [open, setOpen] = react.useState(false);
 
-      react.useEffect(() => scope.subscribe(() => setSnapshot(scope.getSnapshot())), [scope]);
+      react.useEffect(() => {
+        report("card-mount", { status: scope.getSnapshot().status });
+        const seen = { status: scope.getSnapshot().status };
+        return scope.subscribe(() => {
+          const next = scope.getSnapshot();
+          if (next.status !== seen.status) {
+            seen.status = next.status;
+            report("card-status", { status: next.status });
+          }
+          setSnapshot(next);
+        });
+      }, [scope]);
 
       // The card shell always renders (loading included): a silently invisible
       // card is indistinguishable from a registration/pairing failure.
@@ -383,13 +408,15 @@ window.__ModuleLoader__.load({
      * @param ctx - the browser plugin context (slots, settingsScope).
      */
     function apply(ctx) {
+      report("apply-start", { settingsScopeType: typeof ctx.settingsScope, slotsType: typeof ctx.slots });
       // version stamp FIRST: its presence/absence in the browser console tells
       // a missing card apart (module never applied / crashed mid-apply) from an
       // empty data layer (applied but scope never reached ready)
       console.info("[dsh-memory] client half applying (v0.2.1, settingsScope channel)");
-      // pseudo-class styles the inline style objects cannot express
-      // (hover/disabled/focus-visible), injected the same way the official
-      // client packages inject their CSS modules
+      try {
+        // pseudo-class styles the inline style objects cannot express
+        // (hover/disabled/focus-visible), injected the same way the official
+        // client packages inject their CSS modules
       if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=\"dsh-memory\"]") === null) {
         const tag = document.createElement("style");
         tag.dataset.pluginCss = "dsh-memory";
@@ -409,6 +436,11 @@ window.__ModuleLoader__.load({
         order: 30,
         inject: () => ({ scope })
       }, MemoryCard));
+      report("apply-ok");
+      } catch (error) {
+        report("apply-error", { message: String(error && error.message ? error.message : error), stack: String(error && error.stack ? error.stack : "") });
+        throw error;
+      }
     }
 
     exports.inject = ["slots", "settingsScope"];

@@ -171,9 +171,10 @@ export function blockSnippet(text, query) {
  * matching (user decision 2026-08-22: fuzziness allowed, but scored down —
  * exact always outranks fuzzy):
  *   tier 1 (×1.0): literal substring of the whole query (as before);
- *   tier 2 (×0.85): formatting-tolerant literal — both sides passed through
+ *   tier 2 (×0.95): formatting-tolerant literal — both sides passed through
  *     looseNormalize(), so backticks/quotes/bold marks between the keywords
- *     no longer break the hit;
+ *     no longer break the hit (still a whole-phrase match — memory search is
+ *     about text content, so this ranks nearly as high as exact);
  *   tier 3 (×0.7): multi-keyword AND fallback — the query is split on
  *     whitespace and every chunk must appear in the block (order-free);
  *     raw count = min occurrences across chunks.
@@ -189,7 +190,7 @@ export function blockSnippet(text, query) {
  * @param {number} [limit=5]
  * @returns {Array<{rel: string, date: string, kind: string, score: number, snippet: string}>}
  */
-const TIER_WEIGHTS = { 1: 1, 2: 0.85, 3: 0.7 }
+const TIER_WEIGHTS = { 1: 1, 2: 0.95, 3: 0.7 }
 
 export function searchMemory(entries, query, limit = 5) {
   const blocks = []

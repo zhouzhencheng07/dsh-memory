@@ -11,7 +11,7 @@
 // The directory is named `dsh-memory` (not `memory`) on purpose: if the
 // harness ever ships its own memory feature it will likely use `memory`.
 //
-// Write path (2026-08-25, user decision — see index.js header): the `memory`
+// Write path (2026-08-23, user decision — see index.js header): the `memory`
 // tool is a path locator — it returns today's memory file (creating it with
 // the provenance comment when absent, merging the calling session into the
 // comment when present) by dispatching the host's NATIVE read/write tools.
@@ -119,7 +119,7 @@ export function readMemoryFile(file, maxBytes = 2 * 1024 * 1024) {
  * already carries the id (or there is no id to add), the text comes back
  * unchanged with `changed: false`, so a caller never rewrites on formatting
  * differences. The model never touches this — it is maintained exclusively
- * by the `memory` tool (2026-08-25, user decision).
+ * by the `memory` tool (2026-08-23, user decision).
  * @param {string} text - current file text ('' for an absent file)
  * @param {string|undefined} sessionId
  * @returns {{text: string, changed: boolean}}

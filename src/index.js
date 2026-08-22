@@ -13,7 +13,7 @@
 //     older notes still hold details") plus a recency decay in ranking covers
 //     the old digest's convergence job; the digest/ and dream/ directories
 //     were deleted, the memory/ sublevel was merged into the plugin root.
-//   - capture (2026-08-25, user decision, final revision): NO host hooks and
+//   - capture (2026-08-23, user decision, final revision): NO host hooks and
 //     NO end-of-turn reminder hook. Two layers only:
 //       a) a per-turn system-prompt reminder (context contribution
 //          `dsh-memory:auto`, order 200, gated on config `autoMemory`,
@@ -132,7 +132,7 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
 }
 
 /**
- * The path-locating `memory` tool (2026-08-25, user decision): NO arguments —
+ * The path-locating `memory` tool (2026-08-23, user decision): NO arguments —
  * it returns the calling workspace's TODAY memory file. When the file is
  * absent it is CREATED (content = the provenance comment); when present the
  * calling session id is merged into the leading `<!-- 会话来源: ... -->`
@@ -260,7 +260,7 @@ export function apply(ctx) {
     return vectorIndex
   }
 
-  // Per-turn capture reminder (2026-08-25, restored from git history with a
+  // Per-turn capture reminder (2026-08-23, restored from git history with a
   // SHORT text — the timing detail, content rules, and usage live in the
   // memory tool description): a runtime-context contribution assembled fresh
   // on every model request. Deliberately short: "worth keeping in this turn →

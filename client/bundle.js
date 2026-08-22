@@ -133,7 +133,7 @@ window.__ModuleLoader__.load({
         format: (value) => (value === false ? "false" : "true"),
         parse: (text) => ({ kind: "set", value: text === "true" })
       }
-      // ── autoMemory restored 2026-08-25: the per-turn reminder is the capture
+      // ── autoMemory restored 2026-08-23: the per-turn reminder is the capture
       // path again (SHORT text — "worth keeping → must use the memory tool");
       // content rules live in the memory tool description. Off = no reminder;
       // the neutral memory tool stays usable. No end-of-turn hook, no

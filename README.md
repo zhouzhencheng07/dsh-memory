@@ -75,7 +75,7 @@ Auto-Memory 无需任何操作：开启后每轮自动提醒，主 agent 自行�
 
 ```yaml
 dsh-memory:
-  searchLimit: 5            # memory_search 默认返回条数（1-10）
+  searchLimit: 5            # memory_search 返回条数（1-10）；硬约束，agent 不可覆盖
   embeddingBaseUrl: ''      # Ollama 兼容 /api/embed 基地址（如 http://localhost:11434）；留空禁用向量检索
   embeddingModel: 'bge-m3'  # 嵌入模型名
   autoMemory: true          # 自动记忆开关：false = 不再注入提醒

@@ -226,20 +226,30 @@ export function mergeSourceComment(preamble, sessionId) {
  * @param {object} [opts]
  * @param {string} [opts.sourceSessionId] - merged into the leading
  *   `<!-- 会话来源: ... -->` comment; creating a file plants it as line one.
- * @returns {Promise<{file: string, created: boolean, changed: boolean, sections: number}>}
+ * @returns {Promise<{file: string, created: boolean, changed: boolean, sections: number,
+ *   added: number, sectionChanged: boolean}>}
+ *   Section-level granularity (2026-08-22 fix — memory_write status strings):
+ *   `created` is FILE-level (the daily file did not exist before this call);
+ *   `added` counts ops whose title was NEW to the file (section-level
+ *   creation, regardless of mode); `sectionChanged` is true when any existing
+ *   section body changed; `changed` is true when the file was written at all
+ *   (sections or provenance preamble).
  */
 export async function upsertSections(date, slug, ops, opts = {}) {
   const file = join(memoryRoot(), date, `${slug}.md`)
   const clean = (Array.isArray(ops) ? ops : []).filter(
     (op) => op && typeof op.title === 'string' && op.title.trim(),
   )
-  if (clean.length === 0) return { file, created: false, changed: false, sections: 0 }
+  if (clean.length === 0) {
+    return { file, created: false, changed: false, sections: 0, added: 0, sectionChanged: false }
+  }
   return serialized(() => {
     const existed = existsSync(file) && statSync(file).size > 0
     const oldText = existed ? readFileSync(file, 'utf8') : ''
     const { preamble, body } = splitPreamble(oldText)
     const sections = parseSections(body)
-    let changed = false
+    let added = 0
+    let sectionChanged = false
     for (const op of clean) {
       const title = op.title.trim()
       const content = String(op.content ?? '').trim()
@@ -250,22 +260,25 @@ export async function upsertSections(date, slug, ops, opts = {}) {
         const next = op.mode === 'append' ? (old ? `${old}\n${content}` : content) : content
         if (next !== old) {
           sections[idx] = { title, body: next }
-          changed = true
+          sectionChanged = true
         }
       } else {
         sections.push({ title, body: content })
-        changed = true
+        added += 1
+        sectionChanged = true
       }
     }
     const nextPreamble = opts.sourceSessionId ? mergeSourceComment(preamble, opts.sourceSessionId) : preamble
-    if (nextPreamble !== preamble) changed = true
-    if (!changed) return { file, created: !existed, changed: false, sections: sections.length }
+    const changed = sectionChanged || nextPreamble !== preamble
+    if (!changed) {
+      return { file, created: !existed, changed: false, sections: sections.length, added: 0, sectionChanged: false }
+    }
     const out = [nextPreamble, sections.map((s) => `# ${s.title}\n\n${s.body}`).join('\n\n')]
       .filter((part) => part.length > 0)
       .join('\n\n')
     ensureDir(join(file, '..'))
     writeFileSync(file, `${out}\n`, 'utf8')
-    return { file, created: !existed, changed: true, sections: sections.length }
+    return { file, created: !existed, changed: true, sections: sections.length, added, sectionChanged }
   })
 }
 

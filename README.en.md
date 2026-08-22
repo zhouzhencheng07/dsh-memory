@@ -112,7 +112,7 @@ the settings card):
 
 ```yaml
 dsh-memory:
-  searchLimit: 5            # default number of results returned by memory_search (1-10)
+  searchLimit: 5            # number of results returned by memory_search (1-10); a hard cap the agent cannot override
   embeddingBaseUrl: ''      # Ollama-compatible /api/embed base URL (e.g. http://localhost:11434); empty disables vector search
   embeddingModel: 'bge-m3'  # embedding model name
   autoMemory: true          # auto-memory switch: false = no more reminders

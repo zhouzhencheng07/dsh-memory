@@ -85,7 +85,6 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
       'When embeddingBaseUrl is configured, vector search is fused with keyword hits automatically (unified RRF score).',
     parameters: {
       query: { type: 'string', required: true, description: 'Search keywords (Chinese or English, substring match)' },
-      limit: { type: 'number', description: 'Max results, default from config searchLimit' },
     },
     output: {
       schema: { type: 'string' },
@@ -94,8 +93,10 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
     async execute(args) {
       const query = String(args.query ?? '').trim()
       if (!query) throw new Error('memory_search: query is empty')
-      const defaultLimit = getConfig().searchLimit
-      const limit = Math.min(Math.max(Number(args.limit) || defaultLimit, 1), MAX_LIMIT)
+      // Result count is locked to the configured searchLimit (user decision
+      // 2026-08-22): no agent-facing override — an earlier `limit` parameter
+      // let a model accidentally bypass the user's setting, so it was removed.
+      const limit = Math.min(Math.max(Number(getConfig().searchLimit) || 5, 1), MAX_LIMIT)
       const entries = walkMemory()
       // gather extra candidates from each signal so the fusion has room to rank
       const sub = searchMemory(entries, query, Math.min(limit * 3, MAX_LIMIT * 3))
@@ -120,7 +121,8 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
  * The model-facing capture path: upserts one `# ` section into today's daily
  * memory file. Executes in the plugin host process (node:fs via store.js,
  * never through ctx.fs), so it is unaffected by the agent file sandbox — the
- * whole reason it exists (2026-08-22).
+ * whole reason it exists (2026-08-22). Result status strings: created (the
+ * section title is new to the file) / appended / replaced / unchanged.
  */
 function memoryWriteTool() {
   return {
@@ -156,7 +158,12 @@ function memoryWriteTool() {
         [{ title, content, mode }],
         { sourceSessionId: session?.id },
       )
-      const action = result.created ? 'created' : result.changed ? mode + 'd' : 'unchanged'
+      const action =
+        result.added > 0
+          ? 'created' // new section title, even when the daily file already existed
+          : result.sectionChanged
+            ? (mode === 'append' ? 'appended' : 'replaced')
+            : 'unchanged'
       return `${result.file} · # ${title} · ${action} (${result.sections} sections)`
     },
   }

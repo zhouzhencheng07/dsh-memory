@@ -40,6 +40,24 @@ export function normalize(value) {
 }
 
 /**
+ * Formatting-stripped view used by tolerant keyword matching (tier 2/3,
+ * 2026-08-22): markdown decoration (backticks, quotes, bold/emphasis marks,
+ * strikethrough) is removed and whitespace runs collapse, so a query like
+ * `dsh-memory 0.2.2` reaches a note written as ``dsh-memory `0.2.2` `` — the
+ * miss that motivated this. Applied symmetrically to haystack and needle;
+ * identifier characters (`-` `_` `.`) survive untouched, so `dsh-memory`,
+ * `0.2.2`, `snake_case` stay whole.
+ * @param {string} value
+ * @returns {string}
+ */
+export function looseNormalize(value) {
+  return normalize(value)
+    .replace(/[`'"“”‘’*~]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
  * Recency decay weight for a note date (YYYY-MM-DD): 1.0 for today, halving
  * every RECENCY_HALF_LIFE_DAYS, and NEVER below RECENCY_FLOOR — an old but
  * strongly relevant block keeps competing instead of being truncated away.
@@ -149,19 +167,30 @@ export function blockSnippet(text, query) {
 }
 
 /**
- * Search memory entries for a query at BLOCK level. Every heading-aware
- * block of every entry is a candidate hit (`rel#面包屑`); raw occurrence
- * counts are damped by block length (BM25-style, relative to the corpus
- * average block length) so long blocks do not automatically outscore compact
- * ones, then multiplied by the note's recency decay weight (old notes
- * recede but never drop below the floor). Title-only blocks are skipped
- * (mirroring the vector index, which also skips them).
+ * Search memory entries for a query at BLOCK level, with TIERED keyword
+ * matching (user decision 2026-08-22: fuzziness allowed, but scored down —
+ * exact always outranks fuzzy):
+ *   tier 1 (×1.0): literal substring of the whole query (as before);
+ *   tier 2 (×0.85): formatting-tolerant literal — both sides passed through
+ *     looseNormalize(), so backticks/quotes/bold marks between the keywords
+ *     no longer break the hit;
+ *   tier 3 (×0.7): multi-keyword AND fallback — the query is split on
+ *     whitespace and every chunk must appear in the block (order-free);
+ *     raw count = min occurrences across chunks.
+ * Every heading-aware block of every entry is a candidate hit (`rel#面包屑`);
+ * raw occurrence counts are damped by block length (BM25-style, relative to
+ * the corpus average block length), multiplied by the tier weight, then by
+ * the note's recency decay weight (old notes recede but never drop below the
+ * floor). Title-only blocks are skipped (mirroring the vector index, which
+ * also skips them).
  * Ties break by date (newer first), then path.
  * @param {Array<{rel: string, date: string, kind: string, text: string}>} entries
  * @param {string} query - non-empty search text
  * @param {number} [limit=5]
  * @returns {Array<{rel: string, date: string, kind: string, score: number, snippet: string}>}
  */
+const TIER_WEIGHTS = { 1: 1, 2: 0.85, 3: 0.7 }
+
 export function searchMemory(entries, query, limit = 5) {
   const blocks = []
   for (const entry of entries) {
@@ -173,18 +202,39 @@ export function searchMemory(entries, query, limit = 5) {
   }
   const totalLen = blocks.reduce((sum, b) => sum + b.block.text.length, 0)
   const avgLen = Math.max(1, totalLen / Math.max(1, blocks.length))
+  const qLoose = looseNormalize(query)
+  const chunks = qLoose ? qLoose.split(' ') : []
   const hits = []
   for (const { entry, block } of blocks) {
-    const raw = occurrenceCount(block.text, query)
+    const text = block.text
+    // tiered match: exact literal → formatting-tolerant literal → AND chunks
+    let raw = occurrenceCount(text, query)
+    let tier = 1
+    let src = text
+    let needle = query
+    if (raw === 0 && qLoose) {
+      const looseText = looseNormalize(text)
+      raw = occurrenceCount(looseText, qLoose)
+      if (raw > 0) {
+        tier = 2
+        src = looseText
+        needle = qLoose
+      } else if (chunks.length > 1 && chunks.every((c) => looseText.includes(c))) {
+        tier = 3
+        raw = Math.min(...chunks.map((c) => occurrenceCount(looseText, c)))
+        src = looseText
+        needle = chunks.find((c) => looseText.includes(c))
+      }
+    }
     if (raw === 0) continue
-    const lenNorm = raw / (1 + block.text.length / avgLen)
-    const score = lenNorm * recencyWeight(entry.date)
+    const lenNorm = raw / (1 + text.length / avgLen)
+    const score = lenNorm * recencyWeight(entry.date) * TIER_WEIGHTS[tier]
     hits.push({
       rel: block.title ? `${entry.rel}#${block.title}` : entry.rel,
       date: entry.date,
       kind: entry.kind,
       score,
-      snippet: blockSnippet(block.text, query),
+      snippet: blockSnippet(src, needle),
     })
   }
   hits.sort((a, b) => {

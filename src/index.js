@@ -84,7 +84,7 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
       'Ranking already discounts older notes (recency decay), so older but still relevant blocks remain reachable. ' +
       'When embeddingBaseUrl is configured, vector search is fused with keyword hits automatically (unified RRF score).',
     parameters: {
-      query: { type: 'string', required: true, description: 'Search keywords (Chinese or English, substring match)' },
+      query: { type: 'string', required: true, description: 'Search keywords (Chinese or English); formatting marks like backticks/quotes are tolerated, and multiple whitespace-separated keywords are AND-matched' },
     },
     output: {
       schema: { type: 'string' },

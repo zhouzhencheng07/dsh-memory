@@ -19,9 +19,9 @@ the runtime shares one package instance.
 | Feature | Description |
 |---|---|
 | **Auto-Memory** | Injects a memory reminder into the system prompt every turn (`dsh-memory:auto`, order 200); the main agent captures via the `memory_write` tool; sub-agents are not reminded; `autoMemory: false` turns it off instantly |
-| **memory_search tool** | Heading-aware block-level retrieval (any heading splits a block, breadcrumbs included), length-normalized substring matching (CJK-friendly), **per-day decay** (30-day half-life, floor 0.4 — older notes rank lower but never vanish), snippets return whole blocks (≤1000 chars, usually no need to open the file) |
+| **memory_search tool** | Heading-aware block-level retrieval (any heading splits a block, breadcrumbs included), tiered keyword matching (exact ×1.0 → formatting-tolerant ×0.85 → multi-keyword AND ×0.7 — fuzziness allowed but scored down, exact always wins), **per-day decay** (30-day half-life, floor 0.4 — older notes rank lower but never vanish), snippets return whole blocks (≤1000 chars, usually no need to open the file) |
 | **memory_write tool** | Upserts one first-level `#` topic section into today's workspace memory note (new title appends; existing titles get replaced or appended to); executes inside the plugin host process, so **read-only / workspace-write / danger-full-access all behave identically with no escalation**; the leading `<!-- 会话来源: ... -->` provenance comment is maintained automatically (session ids merged) |
-| **Vector fusion (optional)** | With an Ollama-compatible embedding service configured, upgrades automatically to substring + vector RRF fusion (k=60); falls back to pure substring when the service is down — `memory_search` never fails because of vectors |
+| **Vector fusion (optional)** | With an Ollama-compatible embedding service configured, upgrades automatically to keyword + vector RRF fusion (k=60); falls back to pure keyword matching when the service is down — `memory_search` never fails because of vectors |
 | **Config card** | Settings → Plugins → Plugin config → Memory; hot-reloads on save (persisted to settings.yaml, no restart) |
 
 No commands — writing happens via the per-turn reminder plus the `memory_write`
@@ -74,9 +74,11 @@ dsh plugin --profile web add "file:/path/to/dsh-memory"
   or skips on its own — no background LLM calls, no watermark, no retries
 - `src/search.js`: any heading (`#`–`######`) is a chunk boundary and
   subsections become standalone blocks with ancestor breadcrumbs;
-  case-insensitive substring hits normalized by block length; each block's
-  score is multiplied by `max(0.4, 0.5^(days/30))` (per-day decay); exact dedup
-  via `rel#breadcrumb`
+  tiered keyword matching — whole-query literal ×1.0 → formatting-tolerant
+  literal (backticks/quotes/bold marks stripped, identifiers kept) ×0.85 →
+  multi-keyword AND fallback ×0.7, occurrence counts normalized by block
+  length; each block's score is multiplied by `max(0.4, 0.5^(days/30))`
+  (per-day decay); exact dedup via `rel#breadcrumb`
 - `src/embed.js`: optional vector path — in-memory index with sha1 signature
   caching (unchanged files are never re-embedded), cosine ≥ 0.45 joins the
   fusion, RRF k=60; embedding model defaults to `bge-m3`

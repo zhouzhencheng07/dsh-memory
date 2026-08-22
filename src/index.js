@@ -3,7 +3,7 @@
 // Cross-session memory: daily per-workspace notes under
 // $DSH_HOME/dsh-memory/YYYY-MM-DD/, and memory search.
 //
-// Design (agreed with the user, 2026-08-16/17/18/22):
+// Design (agreed with the user, 2026-08-16/17/18/22/25):
 //   - memory = reusable experience reference (decisions, pitfalls, ideas),
 //     NOT a project archive; project detail lives in the workspace docs.
 //   - retrieval: memory_search over the daily notes (block-level, substring +
@@ -13,30 +13,36 @@
 //     older notes still hold details") plus a recency decay in ranking covers
 //     the old digest's convergence job; the digest/ and dream/ directories
 //     were deleted, the memory/ sublevel was merged into the plugin root.
-//   - capture (2026-08-22/23 evening, user decision, simple version): NO
-//     per-turn system-prompt reminder (recoverable in git history) — the
-//     capture timing and the quality rules live in the tool description
-//     instead. ONE path-fixed tool `memory` (mode=read | write | edit) wraps
-//     the host's NATIVE read/write/edit through `ctx.tools.execute()`, so
-//     every dsh mechanism applies honestly:
-//       - the daily file path is fixed inside the tool (the model never
-//         supplies it), but every result echoes the path — one call is
-//         enough for the agent to learn it and use native tools afterwards;
-//       - the fs observation policy (read-before-modify) guards edits and
-//         overwrites exactly as for the native tools: mode=edit on an unread
-//         note is denied with "please read first"; mode=write over an
-//         existing unread note hits createIfAbsent;
-//       - the sandbox fence applies honestly: memory capture needs
-//         danger-full-access, like any native $DSH_HOME write;
-//       - the leading `<!-- 会话来源: ... -->` comment is maintained
-//         automatically (merge on write, one follow-up write after edit) —
-//         zero agent burden.
-//     Native-shape parameters per mode (no composite title/content/mode
-//     upsert) on purpose: the agent reads/writes/edits the note exactly like
-//     a normal file, which is the mode whose output quality the user
-//     accepts.
+//   - capture (2026-08-25, user decision, final revision): NO host hooks and
+//     NO end-of-turn reminder hook. Two layers only:
+//       a) a per-turn system-prompt reminder (context contribution
+//          `dsh-memory:auto`, order 200, gated on config `autoMemory`,
+//          subagents excluded): its text is deliberately SHORT — "when this
+//          turn produced something worth keeping across sessions, you MUST
+//          use the memory tool" — the timing detail, the content rules, and
+//          the usage (native read/write/edit) all live in the `memory` tool
+//          description, which rides the tool schema on every request.
+//          `autoMemory: false` removes the reminder: the tool stays usable
+//          (neutral description, no "must" wording) for users who prefer to
+//          record rarely or only when asked.
+//       b) ONE path-locating tool `memory`: no arguments; returns TODAY's
+//          memory file for the calling workspace. When the file is absent it
+//          is CREATED (content = the provenance comment) and when present
+//          the calling session id is merged into the leading
+//          `<!-- 会话来源: ... -->` comment (exactly idempotent). All file
+//          work dispatches the host's NATIVE read/write through
+//          `ctx.tools.execute()`, so every dsh mechanism applies honestly:
+//          the fs observation policy (read-before-modify) gates the merge
+//          write exactly as for the native tools, and the sandbox fence
+//          applies honestly: memory capture needs danger-full-access, like
+//          any native $DSH_HOME write. After the tool returns the path, the
+//          agent maintains the note with its own native read/edit/write
+//          tools — provenance is NOT re-merged afterwards (a session that
+//          knows the path has already called the tool, so its id is already
+//          in the comment; no hook needed, user decision).
 //   - config: `dsh-memory:` section in $DSH_HOME/settings.yaml, hot-reloaded
-//     (searchLimit / embeddingBaseUrl / embeddingModel), see README.
+//     (searchLimit / embeddingBaseUrl / embeddingModel / autoMemory), see
+//     README.
 //
 // Plain ESM JavaScript on purpose. `@deepseek-ai/*` resolves at runtime
 // through Node's parent-walk (the harness installs them in the profile
@@ -47,7 +53,7 @@ import z from '@deepseek-ai/schemastery'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { CallId } from '@deepseek-ai/dsh-llm'
-import { memoryRoot, mergeSourceComment, readMemoryFile, sessionSlug, splitPreamble, todayStamp, walkMemory } from './store.js'
+import { memoryRoot, mergeProvenance, readMemoryFile, sessionSlug, todayStamp, walkMemory } from './store.js'
 import { formatHits, fuseHits, searchMemory } from './search.js'
 import { EmbeddingClient, VectorIndex } from './embed.js'
 
@@ -74,6 +80,9 @@ export const Config = z.object({
   embeddingBaseUrl: z.string(),
   /** Embedding model served by embeddingBaseUrl. */
   embeddingModel: z.string().default('bge-m3'),
+  /** Per-turn system-prompt reminder ("use the memory tool when something is
+   * worth keeping"); off = no reminder, the neutral memory tool remains. */
+  autoMemory: z.boolean().default(true),
 })
 
 const MAX_LIMIT = 10
@@ -123,18 +132,20 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
 }
 
 /**
- * The single path-fixed memory tool (2026-08-23, user decision): ONE tool
- * `memory` with three modes (read | write | edit), each forwarding to the
- * host's NATIVE tool of the same name through `ctx.tools.execute()` — same
- * sandbox fence, same "must read before modify" observation, same semantics.
- * Differences from the native tools: the daily file path is fixed inside
- * (the model never supplies it; every result echoes it), and the
- * `<!-- 会话来源: ... -->` comment is maintained automatically (merged into
- * the written text on mode=write; one follow-up write on mode=edit — the
- * edit just recorded an observation for the session, so the follow-up passes
- * the version guard; a no-op merge skips it).
+ * The path-locating `memory` tool (2026-08-25, user decision): NO arguments —
+ * it returns the calling workspace's TODAY memory file. When the file is
+ * absent it is CREATED (content = the provenance comment); when present the
+ * calling session id is merged into the leading `<!-- 会话来源: ... -->`
+ * comment (exactly idempotent — no write when the id is already there). All
+ * file work dispatches the host's NATIVE read/write through
+ * `ctx.tools.execute()`: the probe read records the observation so the merge
+ * write passes the version guard (replaceIfVersion on an existing file,
+ * createIfAbsent on a new one), and the sandbox fence applies honestly. The
+ * agent then maintains the note with its own native read/edit/write tools;
+ * provenance is NOT re-merged afterwards — a session that knows the path has
+ * already called this tool, so its id is already in the comment.
  */
-function memoryTool(ctx) {
+function memoryLocatorTool(ctx) {
   let subSeq = 0
 
   /** Dispatch one native tool call through the real registry pipeline. */
@@ -161,90 +172,35 @@ function memoryTool(ctx) {
     return join(memoryRoot(), todayStamp(), `${sessionSlug(exec?.agent?.session?.header?.cwd)}.md`)
   }
 
-  /** Fold the session id into the provenance comment and the new content. */
-  function withProvenance(content, oldPreamble, sessionId) {
-    const trimmed = content.trimStart()
-    const hasOwnComment = /^<!--\s*会话来源:/.test(trimmed)
-    const base = hasOwnComment ? splitPreamble(content).preamble : oldPreamble
-    const merged = sessionId ? mergeSourceComment(base, sessionId) : base
-    if (hasOwnComment) {
-      const rest = content.replace(/^<!--[\s\S]*?-->\s*/m, '').trim()
-      return merged ? (rest ? `${merged}\n\n${rest}` : merged) : rest
-    }
-    return merged ? (content.trim() ? `${merged}\n\n${content.trim()}` : merged) : content.trim()
-  }
-
   return {
     name: 'memory',
     description:
-      "Manage the agent's daily workspace memory note. Call it when this turn produced durable knowledge worth keeping across sessions: decisions and their reasons, user preferences or corrections, pitfalls and how they were fixed, reusable commands or processes, state changes. Keep content concise and worth referencing — no play-by-play; merge related topics into one section; outdated memories pass in a sentence or two. mode=read reviews the note; mode=write is for creating the note when it does not exist; mode=edit modifies a portion of an existing note via old_string/new_string.",
-    parameters: {
-      mode: { type: 'string', required: true, description: "'read' | 'write' | 'edit'" },
-      offset: { type: 'number', description: 'mode=read: 1-based first line to return. Defaults to 1.' },
-      limit: { type: 'number', description: 'mode=read: maximum number of lines to return.' },
-      content: { type: 'string', description: 'mode=write: full new content of the note (markdown).' },
-      old_string: { type: 'string', description: 'mode=edit: literal text to replace. Must match exactly.' },
-      new_string: { type: 'string', description: 'mode=edit: literal replacement text. Use an empty string to delete the match.' },
-      replace_all: { type: 'boolean', description: 'mode=edit: replace all matches. Defaults to false; when false, old_string must appear exactly once.' },
-    },
+      "Returns today's cross-session memory note path for this workspace (one markdown file per workspace per day; created automatically and tagged with the session source when missing — the leading <!-- 会话来源: ... --> comment is maintained for you). " +
+      'Maintain the note with the NATIVE read/write/edit tools: read first, then edit local changes or write to create/replace the whole file. ' +
+      'Content rules: only record experience worth reusing across sessions — decisions and their reasons, user preferences/corrections/conventions, pitfalls and how they were fixed, reusable commands or processes, state changes; organize topics with # headings, merge related topics instead of duplicating, correct outdated items in a sentence or two, no play-by-play.',
+    parameters: {},
     output: {
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
-    async execute(args, exec) {
-      const mode = String(args.mode ?? '').trim()
+    async execute(_args, exec) {
       const file = dailyFile(exec)
       const sessionId = exec?.agent?.session?.id
-
-      if (mode === 'read') {
-        const value = await dispatch(
-          'read',
-          {
-            file_path: file,
-            ...(args.offset ? { offset: args.offset } : {}),
-            ...(args.limit ? { limit: args.limit } : {}),
-          },
-          exec,
-        )
-        const lines = (Array.isArray(value.lines) ? value.lines : []).map((l) => `${String(l.number).padStart(4)}: ${l.text}`)
-        return [`${value.path} (${value.totalLines} lines)`, ...lines].join('\n')
+      // Probe read first: success records the observation (so a merge write on
+      // an existing file passes replaceIfVersion); failure (ENOENT) means the
+      // file is absent and the write below goes createIfAbsent.
+      let existed = true
+      try {
+        await dispatch('read', { file_path: file }, exec)
+      } catch {
+        existed = false
       }
-
-      if (mode === 'write') {
-        // provenance merge first; then the native write itself enforces the
-        // gates: create when absent, overwrite only after a prior read
-        const current = readMemoryFile(file)
-        const oldPreamble = current !== null ? splitPreamble(current).preamble : ''
-        const finalText = withProvenance(String(args.content ?? ''), oldPreamble, sessionId)
-        const outcome = await dispatch('write', { file_path: file, content: finalText }, exec)
-        return `${file} · ${outcome.operation} (${outcome.version})`
+      const current = existed ? readMemoryFile(file) : null
+      const { text, changed } = mergeProvenance(sessionId ? current ?? '' : '', sessionId)
+      if (!existed || changed) {
+        await dispatch('write', { file_path: file, content: text }, exec)
       }
-
-      if (mode === 'edit') {
-        const outcome = await dispatch(
-          'edit',
-          {
-            file_path: file,
-            old_string: String(args.old_string ?? ''),
-            new_string: String(args.new_string ?? ''),
-            replace_all: args.replace_all === true,
-          },
-          exec,
-        )
-        // provenance follow-up (no-op when the comment already carries the id)
-        try {
-          const text = readMemoryFile(file)
-          if (text !== null) {
-            const next = withProvenance(text, '', sessionId)
-            if (next !== text && next !== null) await dispatch('write', { file_path: file, content: next }, exec)
-          }
-        } catch (error) {
-          console.warn(`dsh-memory: provenance follow-up failed (${error?.message ?? String(error)})`)
-        }
-        return `${file} · edited (${String(outcome.before).length} → ${String(outcome.after).length} chars)`
-      }
-
-      throw new Error("memory: mode must be 'read', 'write' or 'edit'")
+      return `${file} · ${existed ? 'existing' : 'created'} — maintain with native read/edit/write (read before modify)`
     },
   }
 }
@@ -260,6 +216,7 @@ export function apply(ctx) {
     searchLimit: 5,
     embeddingBaseUrl: '',
     embeddingModel: 'bge-m3',
+    autoMemory: true,
   }
   const runtime = { ...DEFAULTS }
   {
@@ -268,6 +225,7 @@ export function apply(ctx) {
       runtime.searchLimit = source.searchLimit
       runtime.embeddingBaseUrl = source.embeddingBaseUrl ?? ''
       runtime.embeddingModel = source.embeddingModel || 'bge-m3'
+      runtime.autoMemory = source.autoMemory !== false
     }
     // setSource hands over a THUNK (() => scope.get()), not the value; it
     // fires at attach/detach, while every committed change goes through
@@ -302,11 +260,36 @@ export function apply(ctx) {
     return vectorIndex
   }
 
-  // Model tools: memory_search (retrieval) + the single path-fixed `memory`
-  // tool (mode read|write|edit). No per-turn reminder, no Dream layer.
+  // Per-turn capture reminder (2026-08-25, restored from git history with a
+  // SHORT text — the timing detail, content rules, and usage live in the
+  // memory tool description): a runtime-context contribution assembled fresh
+  // on every model request. Deliberately short: "worth keeping in this turn →
+  // you MUST use the memory tool". Gated on config autoMemory (empty text is
+  // dropped from the rendered snapshot) and on subagents (delegationDepth >
+  // 0): their memory belongs to the main agent's consolidation.
+  ctx.effect(() => {
+    const fiber = ctx.inject(['systemPrompt'], (scope) => {
+      scope.systemPrompt.context({
+        name: 'dsh-memory:auto',
+        order: 200,
+        text: (context) => {
+          if (!runtime.autoMemory) return ''
+          const session = context.agent?.session
+          if (!session?.id) return ''
+          if ((session.header?.delegationDepth ?? 0) > 0) return ''
+          return '【自动记忆】本轮有值得跨会话保留的新内容时，必须使用 memory 工具。'
+        },
+      })
+    })
+    return () => fiber.dispose()
+  })
+
+  // Model tools: memory_search (retrieval) + the path-locating `memory` tool
+  // (returns today's note path; creates/provenance-tags it; the agent then
+  // maintains the note with native read/edit/write). No host hooks.
   const tools = [
     memorySearchTool(ctx, getConfig, getVectorIndex),
-    memoryTool(ctx),
+    memoryLocatorTool(ctx),
   ]
   for (const tool of tools) {
     if (tool === undefined) continue

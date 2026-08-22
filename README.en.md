@@ -4,28 +4,32 @@ English | [中文](README.md)
 
 A cross-session global memory plugin for DeepSeek Harness (dsh).
 
-The main agent decides on its own whether this turn produced anything worth
-keeping across sessions and reads/writes it through the path-fixed **`memory`
-tool** (mode=read | write | edit) — the capture timing and the quality rules
-live entirely in the tool description (sent with the tool schema on every
-request, **no per-turn system-prompt reminder**); the `memory_search` tool
-retrieves those notes with **block-level search** (optional vector fusion,
-per-day recency decay). Ships as a bundle plugin (`dsh.bundle`) — 0 patches,
-**zero npm dependencies, zero build step**; `@deepseek-ai/*` resolves through
-dsh's flat module fallback, so the runtime shares one package instance.
+The main agent decides whether this turn produced anything worth keeping
+across sessions: a **per-turn system-prompt reminder** ("when this turn has
+something worth keeping, you MUST use the memory tool" — off via
+`autoMemory: false`) nudges it to capture through the path-locating **`memory`
+tool**, which returns today's memory note path (creating it automatically and
+maintaining the session-source comment); the note is then maintained with the
+plain **native read/write/edit tools**, and all timing/content rules live in
+the `memory` tool description (sent with the tool schema on every request).
+The `memory_search` tool retrieves those notes with **block-level search**
+(optional vector fusion, per-day recency decay). Ships as a bundle plugin
+(`dsh.bundle`) — 0 patches, **zero npm dependencies, zero build step**;
+`@deepseek-ai/*` resolves through dsh's flat module fallback, so the runtime
+shares one package instance.
 
 ## Features
 
 | Feature | Description |
 |---|---|
-| **Tool-driven capture** | The `memory` tool description carries both the timing (decisions, user corrections, pitfalls, reusable commands, state changes) and the quality rules (merge-first, deprecated alternatives in a sentence or two, split long sections, no diary-style logs); the main agent decides when to use it — no per-turn system-prompt reminder |
+| **Per-turn reminder (optional)** | A short system-prompt reminder assembled on every request: "when this turn has something worth keeping across sessions, you MUST use the memory tool". Deliberately terse — the timing, content rules, and usage live in the `memory` tool description. Turn it off with `autoMemory: false` for a "record only when asked" style; the neutral `memory` tool stays usable |
+| **memory tool** | A path locator with **no arguments**: returns today's memory note for this workspace (one file per workspace per day). When the file is absent it is **created** (content = the `<!-- 会话来源: ... -->` session-source comment); when present the calling session is merged into that comment (exactly idempotent). The description carries the capture timing (decisions and reasons, user corrections/conventions, pitfalls and fixes, reusable commands/processes, state changes) and the quality rules (read before modify; edit local changes, write to create/replace the whole file; # headings per topic, merge related topics, fix outdated items in a sentence or two, no play-by-play). All file work dispatches the host's **native read/write pipeline** — same sandbox fence and read-before-modify observation as the model's own file tools (`$DSH_HOME` writes need danger-full-access) |
 | **memory_search tool** | Heading-aware block-level retrieval (any heading splits a block, breadcrumbs included), tiered keyword matching (exact ×1.0 → formatting-tolerant ×0.95 → multi-keyword AND ×0.7 — fuzziness allowed but scored down, exact always wins), **per-day decay** (30-day half-life, floor 0.4 — older notes rank lower but never vanish), snippets return whole blocks (≤1000 chars, usually no need to open the file) |
-| **memory tool** | One tool, three modes (`read`/`write`/`edit`): it computes today's workspace memory note internally (the model never supplies the path — but every result echoes it, so one call teaches the path for native tools), and dispatches the host's **native read/write/edit pipeline** — the same sandbox fence and read-before-modify observation as the model's own file tools (mode=edit on an unread note is denied; mode=write over an existing unread note is denied; `$DSH_HOME` writes need danger-full-access); the leading `<!-- 会话来源: ... -->` provenance comment is maintained automatically (merged on write, one follow-up write after edit) |
 | **Vector fusion (optional)** | With an Ollama-compatible embedding service configured, upgrades automatically to keyword + vector RRF fusion (k=60); falls back to pure keyword matching when the service is down — `memory_search` never fails because of vectors |
 | **Config card** | Settings → Plugins → Plugin config → Memory; hot-reloads on save (persisted to settings.yaml, no restart) |
 
-No commands — writing happens on the model's own judgment guided by the tool
-descriptions, retrieval via the `memory_search` tool.
+No commands — the per-turn reminder (when enabled) tells the model when the
+`memory` tool must be used; retrieval goes through the `memory_search` tool.
 
 ## Storage layout
 
@@ -39,7 +43,7 @@ $DSH_HOME/dsh-memory/
 ```
 
 - **No state files**: no watermarks or turn counters; the date is resolved when
-  `memory_write` executes and rolls over to the new day's file automatically at
+  the `memory` tool runs and rolls over to the new day's file automatically at
   midnight
 - rel paths carry the date, so every hit's age is visible at a glance
 
@@ -62,12 +66,17 @@ commits).
 
 ## How it works
 
-- `src/index.js`: the single path-fixed `memory` tool (modes `read`/`write`/
-  `edit`) — each mode dispatches the host's native read/write/edit through
-  `ctx.tools.execute()` (same sandbox fence, same read-before-modify
-  observation; mode=write merges the provenance comment into the content
-  before writing, mode=edit runs one provenance follow-up write after a
-  successful edit); every result echoes the file path
+- `src/index.js`: the path-locating `memory` tool (no arguments) — computes
+  today's note path from the session cwd, probes it with a dispatched native
+  `read` (records the observation, so the merge below passes the version
+  guard), then dispatches a native `write` when the file is absent (creating
+  it with the source comment) or when the calling session id is missing from
+  the comment (idempotent, no write otherwise); plus the per-turn reminder, a
+  `systemPrompt.context` contribution (`dsh-memory:auto`, order 200) gated on
+  `autoMemory` and on subagents — its text is deliberately short, all rules
+  live in the tool description. **No host hooks** (no `tools/result` /
+  turn-stopping listeners): a session that knows the note path has already
+  called the `memory` tool, so its source is already maintained
 - `src/search.js`: any heading (`#`–`######`) is a chunk boundary and
   subsections become standalone blocks with ancestor breadcrumbs;
   tiered keyword matching — whole-query literal ×1.0 → formatting-tolerant
@@ -79,9 +88,9 @@ commits).
   caching (unchanged files are never re-embedded), cosine ≥ 0.45 joins the
   fusion, RRF k=60; embedding model defaults to `bge-m3`
 - `src/store.js`: pure-function vocabulary — path/slug/date derivation,
-  provenance-comment parsing and merging, `walkMemory` (the plugin never
-  writes to disk itself; all mutations go through the dispatched native
-  tools)
+  provenance-comment parsing and merging (`mergeProvenance`, exactly
+  idempotent), `walkMemory` (the plugin never writes to disk directly; file
+  work goes through the dispatched native read/write tools)
 - `client/bundle.js`: hand-written client bundle registering into the
   `settings.plugin.item` keyed slot (`key: 'dsh-memory'`); reads and writes go
   through the official client settings scope (`ctx.settingsScope.bind`) —
@@ -98,24 +107,23 @@ commits).
 # model-side tool: search the memory library (older notes rank lower but stay reachable)
 memory_search query="vector search threshold"
 
-# model-side tool: read today's memory (returns path + line-numbered content;
-# also satisfies the read-before-modify rule)
-memory mode="read"
+# model-side tool: locate today's memory note — returns the path, creates the
+# file (with the source comment) when absent, merges this session into the
+# source comment when present
+memory
 
-# model-side tool: fully replace today's memory (timing and rules live in the
-# tool description; requires danger-full-access for $DSH_HOME; created when
-# absent, existing notes need a prior read)
-memory mode="write" content="# Topic
-
-- point ……"
-
-# model-side tool: edit a portion (denied on an unread note — mode=read first)
-memory mode="edit" old_string="old sentence" new_string="new sentence"
+# then maintain the note with the NATIVE file tools (read before modify):
+read file_path="<path from memory>"
+edit file_path="<path>" old_string="..." new_string="..."
+# or write file_path="<path>" content="# Topic ..." to create/replace the whole file
 ```
 
-Memory needs no action: the tool description carries both timing and
-discipline — the main agent decides on its own. Every result echoes the file
-path, so one call teaches the path and native tools can be used afterwards.
+With `autoMemory: true` (default) every turn carries a short reminder — when
+this turn produced something worth keeping across sessions, the `memory` tool
+**must** be used; the file's leading `<!-- 会话来源: ... -->` comment is
+maintained automatically by the tool. With `autoMemory: false` there is no
+reminder — record only when asked (the tool description stays neutral, no
+"must" wording).
 
 ## Configuration
 
@@ -127,6 +135,7 @@ dsh-memory:
   searchLimit: 5            # number of results returned by memory_search (1-10); a hard cap the agent cannot override
   embeddingBaseUrl: ''      # Ollama-compatible /api/embed base URL (e.g. http://localhost:11434); empty disables vector search
   embeddingModel: 'bge-m3'  # embedding model name
+  autoMemory: true          # per-turn reminder ("worth keeping -> must use the memory tool"); false = record only when asked
 ```
 
 ## Requirements

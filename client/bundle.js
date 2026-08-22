@@ -44,6 +44,8 @@ window.__ModuleLoader__.load({
       embeddingBaseUrlHint: "Ollama base URL (e.g. http://localhost:11434) for vector search; blank disables it.",
       embeddingModel: "Embedding model",
       embeddingModelHint: "Embedding model name served by the base URL (e.g. bge-m3).",
+      autoMemory: "Per-turn memory reminder",
+      autoMemoryHint: "Remind every turn: when something is worth keeping across sessions, the memory tool must be used. Off = record only when asked.",
       overridden: "Overridden",
       reset: "Reset to default",
       save: "Save",
@@ -66,6 +68,8 @@ window.__ModuleLoader__.load({
       embeddingBaseUrlHint: "Ollama 基地址（如 http://localhost:11434），用于向量检索；留空禁用。",
       embeddingModel: "嵌入模型",
       embeddingModelHint: "该服务上的嵌入模型名（如 bge-m3）。",
+      autoMemory: "每轮记忆提醒",
+      autoMemoryHint: "每轮提醒：本轮有值得跨会话保留的内容时必须使用 memory 工具；关闭后仅在明确要求时记录。",
       overridden: "已覆盖",
       reset: "恢复默认",
       save: "保存",
@@ -122,10 +126,20 @@ window.__ModuleLoader__.load({
           return trimmed === "" ? { kind: "clear" } : { kind: "set", value: trimmed };
         }
       },
-      // ── autoMemory: removed 2026-08-22 evening (per-turn reminder deleted;
-      // capture timing lives in the memory_write tool description) ──
+      autoMemory: {
+        kind: "bool",
+        label: "autoMemory",
+        hint: "autoMemoryHint",
+        format: (value) => (value === false ? "false" : "true"),
+        parse: (text) => ({ kind: "set", value: text === "true" })
+      }
+      // ── autoMemory restored 2026-08-25: the per-turn reminder is the capture
+      // path again (SHORT text — "worth keeping → must use the memory tool");
+      // content rules live in the memory tool description. Off = no reminder;
+      // the neutral memory tool stays usable. No end-of-turn hook, no
+      // tools/result provenance hook (the memory tool maintains provenance). ──
     };
-    const FIELDS = ["searchLimit", "embeddingBaseUrl", "embeddingModel"];
+    const FIELDS = ["searchLimit", "embeddingBaseUrl", "embeddingModel", "autoMemory"];
 
     // ── theme-aligned styles (dsw alias tokens, as the official cards use) ──
     // (dropped during the migration rewrite once — the card then crashed every

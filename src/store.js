@@ -11,13 +11,16 @@
 // The directory is named `dsh-memory` (not `memory`) on purpose: if the
 // harness ever ships its own memory feature it will likely use `memory`.
 //
-// Write path (2026-08-22 evening, simple design — see index.js header):
-// the path-fixed memory_read/memory_write/memory_edit tools dispatch the
-// host's native read/write/edit, so the plugin itself no longer writes with
-// node:fs at all. This file keeps only: path/slug/date derivation, the
-// provenance-comment merge (preamble split + session-id merge), the raw
-// text read used to construct edit/provenance inputs, and the walk used by
-// memory_search.
+// Write path (2026-08-25, user decision — see index.js header): the `memory`
+// tool is a path locator — it returns today's memory file (creating it with
+// the provenance comment when absent, merging the calling session into the
+// comment when present) by dispatching the host's NATIVE read/write tools.
+// The model then maintains the note with its own native read/edit/write
+// tools. No host hooks (tools/result etc.) are registered; provenance is
+// maintained exclusively inside the memory tool. This file keeps only:
+// path/slug/date derivation, the provenance-comment merge (preamble split +
+// session-id merge, exported as mergeProvenance), the raw text read used to
+// construct the merge input, and the walk used by memory_search.
 
 import { existsSync, readdirSync, statSync, readFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
@@ -106,6 +109,29 @@ export function readMemoryFile(file, maxBytes = 2 * 1024 * 1024) {
   const stat = statSync(file)
   if (stat.size > maxBytes) return ''
   return readFileSync(file, 'utf8')
+}
+
+/**
+ * Merge one session id into a memory file's text: the leading provenance
+ * comment(s) are collapsed into ONE `<!-- 会话来源: ... -->` line carrying
+ * all ids in first-seen order (the new id appended when missing); any other
+ * preamble lines survive above it. Exactly idempotent: when the comment
+ * already carries the id (or there is no id to add), the text comes back
+ * unchanged with `changed: false`, so a caller never rewrites on formatting
+ * differences. The model never touches this — it is maintained exclusively
+ * by the `memory` tool (2026-08-25, user decision).
+ * @param {string} text - current file text ('' for an absent file)
+ * @param {string|undefined} sessionId
+ * @returns {{text: string, changed: boolean}}
+ */
+export function mergeProvenance(text, sessionId) {
+  const split = splitPreamble(text)
+  const merged = sessionId ? mergeSourceComment(split.preamble, sessionId) : split.preamble
+  if (merged === split.preamble) {
+    return { text: String(text ?? ''), changed: false }
+  }
+  const body = split.body.trim()
+  return { text: body ? `${merged}\n\n${body}` : merged, changed: true }
 }
 
 /**

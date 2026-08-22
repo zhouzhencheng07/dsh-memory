@@ -37,15 +37,13 @@ window.__ModuleLoader__.load({
     // ── locale copy ──────────────────────────────────────────────────────────
     const en = {
       title: "Memory (dsh-memory)",
-      description: "Cross-session memory: background Auto-Memory and memory_search.",
+      description: "Cross-session memory: daily per-workspace notes and memory_search.",
       searchLimit: "Search result limit",
       searchLimitHint: "Result count for memory_search (1-10); the agent cannot override it.",
       embeddingBaseUrl: "Embedding base URL",
       embeddingBaseUrlHint: "Ollama base URL (e.g. http://localhost:11434) for vector search; blank disables it.",
       embeddingModel: "Embedding model",
       embeddingModelHint: "Embedding model name served by the base URL (e.g. bge-m3).",
-      autoMemory: "Auto-Memory",
-      autoMemoryHint: "Each turn the agent decides for itself whether anything worth keeping happened and writes it to today's memory file; off = no per-turn reminder.",
       overridden: "Overridden",
       reset: "Reset to default",
       save: "Save",
@@ -61,15 +59,13 @@ window.__ModuleLoader__.load({
     };
     const zh = {
       title: "记忆（dsh-memory）",
-      description: "跨会话记忆：后台 Auto-Memory 自动捕获与 memory_search 检索。",
+      description: "跨会话记忆：每日工作区笔记与 memory_search 检索。",
       searchLimit: "搜索返回条数",
       searchLimitHint: "memory_search 返回条数（1-10），agent 不可覆盖。",
       embeddingBaseUrl: "向量嵌入服务地址",
       embeddingBaseUrlHint: "Ollama 基地址（如 http://localhost:11434），用于向量检索；留空禁用。",
       embeddingModel: "嵌入模型",
       embeddingModelHint: "该服务上的嵌入模型名（如 bge-m3）。",
-      autoMemory: "自动记忆",
-      autoMemoryHint: "每轮由 agent 自行判断是否有值得记忆的新内容并写入当日记忆文件；关闭后不再每轮提醒。",
       overridden: "已覆盖",
       reset: "恢复默认",
       save: "保存",
@@ -126,21 +122,10 @@ window.__ModuleLoader__.load({
           return trimmed === "" ? { kind: "clear" } : { kind: "set", value: trimmed };
         }
       },
-      // A checkbox never clears: unchecking stores false explicitly, because
-      // clearing would inherit autoMemory's default (true) — the opposite of
-      // what switching it off means.
-      autoMemory: {
-        kind: "bool",
-        label: "autoMemory",
-        hint: "autoMemoryHint",
-        format: (value) => (typeof value === "boolean" ? String(value) : ""),
-        parse: (text) =>
-          text === "true" ? { kind: "set", value: true }
-          : text === "false" ? { kind: "set", value: false }
-          : undefined
-      }
+      // ── autoMemory: removed 2026-08-22 evening (per-turn reminder deleted;
+      // capture timing lives in the memory_write tool description) ──
     };
-    const FIELDS = ["searchLimit", "embeddingBaseUrl", "embeddingModel", "autoMemory"];
+    const FIELDS = ["searchLimit", "embeddingBaseUrl", "embeddingModel"];
 
     // ── theme-aligned styles (dsw alias tokens, as the official cards use) ──
     // (dropped during the migration rewrite once — the card then crashed every

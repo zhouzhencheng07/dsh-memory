@@ -4,28 +4,28 @@ English | [中文](README.md)
 
 A cross-session global memory plugin for DeepSeek Harness (dsh).
 
-On every model request the main agent receives an auto-memory reminder in the
-system prompt, decides whether this turn produced anything worth keeping across
-sessions, and upserts it into a daily memory note through the **`memory_write`
-tool** (written directly by the plugin host, so it works under every file
-sandbox mode); the `memory_search` tool retrieves those notes with
-**block-level search** (optional vector fusion, per-day recency decay). Ships
-as a bundle plugin (`dsh.bundle`) — 0 patches, **zero npm dependencies, zero
-build step**; `@deepseek-ai/*` resolves through dsh's flat module fallback, so
-the runtime shares one package instance.
+The main agent decides on its own whether this turn produced anything worth
+keeping across sessions and reads/writes it through the path-fixed **`memory`
+tool** (mode=read | write | edit) — the capture timing and the quality rules
+live entirely in the tool description (sent with the tool schema on every
+request, **no per-turn system-prompt reminder**); the `memory_search` tool
+retrieves those notes with **block-level search** (optional vector fusion,
+per-day recency decay). Ships as a bundle plugin (`dsh.bundle`) — 0 patches,
+**zero npm dependencies, zero build step**; `@deepseek-ai/*` resolves through
+dsh's flat module fallback, so the runtime shares one package instance.
 
 ## Features
 
 | Feature | Description |
 |---|---|
-| **Auto-Memory** | Injects a memory reminder into the system prompt every turn (`dsh-memory:auto`, order 200); the main agent captures via the `memory_write` tool; sub-agents are not reminded; `autoMemory: false` turns it off instantly |
+| **Tool-driven capture** | The `memory` tool description carries both the timing (decisions, user corrections, pitfalls, reusable commands, state changes) and the quality rules (merge-first, deprecated alternatives in a sentence or two, split long sections, no diary-style logs); the main agent decides when to use it — no per-turn system-prompt reminder |
 | **memory_search tool** | Heading-aware block-level retrieval (any heading splits a block, breadcrumbs included), tiered keyword matching (exact ×1.0 → formatting-tolerant ×0.95 → multi-keyword AND ×0.7 — fuzziness allowed but scored down, exact always wins), **per-day decay** (30-day half-life, floor 0.4 — older notes rank lower but never vanish), snippets return whole blocks (≤1000 chars, usually no need to open the file) |
-| **memory_write tool** | Upserts one first-level `#` topic section into today's workspace memory note (new title appends; existing titles get replaced or appended to); executes inside the plugin host process, so **read-only / workspace-write / danger-full-access all behave identically with no escalation**; the leading `<!-- 会话来源: ... -->` provenance comment is maintained automatically (session ids merged) |
+| **memory tool** | One tool, three modes (`read`/`write`/`edit`): it computes today's workspace memory note internally (the model never supplies the path — but every result echoes it, so one call teaches the path for native tools), and dispatches the host's **native read/write/edit pipeline** — the same sandbox fence and read-before-modify observation as the model's own file tools (mode=edit on an unread note is denied; mode=write over an existing unread note is denied; `$DSH_HOME` writes need danger-full-access); the leading `<!-- 会话来源: ... -->` provenance comment is maintained automatically (merged on write, one follow-up write after edit) |
 | **Vector fusion (optional)** | With an Ollama-compatible embedding service configured, upgrades automatically to keyword + vector RRF fusion (k=60); falls back to pure keyword matching when the service is down — `memory_search` never fails because of vectors |
 | **Config card** | Settings → Plugins → Plugin config → Memory; hot-reloads on save (persisted to settings.yaml, no restart) |
 
-No commands — writing happens via the per-turn reminder plus the `memory_write`
-tool, retrieval via the `memory_search` tool.
+No commands — writing happens on the model's own judgment guided by the tool
+descriptions, retrieval via the `memory_search` tool.
 
 ## Storage layout
 
@@ -62,9 +62,12 @@ commits).
 
 ## How it works
 
-- `src/auto.js`: Auto-Memory — registers a system prompt context (order 200)
-  re-evaluated on every request assembly; the main agent calls `memory_write`
-  or skips on its own — no background LLM calls, no watermark, no retries
+- `src/index.js`: the single path-fixed `memory` tool (modes `read`/`write`/
+  `edit`) — each mode dispatches the host's native read/write/edit through
+  `ctx.tools.execute()` (same sandbox fence, same read-before-modify
+  observation; mode=write merges the provenance comment into the content
+  before writing, mode=edit runs one provenance follow-up write after a
+  successful edit); every result echoes the file path
 - `src/search.js`: any heading (`#`–`######`) is a chunk boundary and
   subsections become standalone blocks with ancestor breadcrumbs;
   tiered keyword matching — whole-query literal ×1.0 → formatting-tolerant
@@ -75,8 +78,10 @@ commits).
 - `src/embed.js`: optional vector path — in-memory index with sha1 signature
   caching (unchanged files are never re-embedded), cosine ≥ 0.45 joins the
   fusion, RRF k=60; embedding model defaults to `bge-m3`
-- `src/store.js`: reads/writes the daily notes under `$DSH_HOME/dsh-memory/`
-  (section-level upsert, provenance-comment merging, in-process write queue)
+- `src/store.js`: pure-function vocabulary — path/slug/date derivation,
+  provenance-comment parsing and merging, `walkMemory` (the plugin never
+  writes to disk itself; all mutations go through the dispatched native
+  tools)
 - `client/bundle.js`: hand-written client bundle registering into the
   `settings.plugin.item` keyed slot (`key: 'dsh-memory'`); reads and writes go
   through the official client settings scope (`ctx.settingsScope.bind`) —
@@ -93,12 +98,24 @@ commits).
 # model-side tool: search the memory library (older notes rank lower but stay reachable)
 memory_search query="vector search threshold"
 
-# model-side tool: write today's memory (the per-turn reminder's target; sandbox-proof)
-memory_write title="Topic" content="- point ……" mode="replace"
+# model-side tool: read today's memory (returns path + line-numbered content;
+# also satisfies the read-before-modify rule)
+memory mode="read"
+
+# model-side tool: fully replace today's memory (timing and rules live in the
+# tool description; requires danger-full-access for $DSH_HOME; created when
+# absent, existing notes need a prior read)
+memory mode="write" content="# Topic
+
+- point ……"
+
+# model-side tool: edit a portion (denied on an unread note — mode=read first)
+memory mode="edit" old_string="old sentence" new_string="new sentence"
 ```
 
-Auto-Memory needs no action: once enabled, every turn gets the reminder and the
-main agent decides what to capture via `memory_write`.
+Memory needs no action: the tool description carries both timing and
+discipline — the main agent decides on its own. Every result echoes the file
+path, so one call teaches the path and native tools can be used afterwards.
 
 ## Configuration
 
@@ -110,7 +127,6 @@ dsh-memory:
   searchLimit: 5            # number of results returned by memory_search (1-10); a hard cap the agent cannot override
   embeddingBaseUrl: ''      # Ollama-compatible /api/embed base URL (e.g. http://localhost:11434); empty disables vector search
   embeddingModel: 'bge-m3'  # embedding model name
-  autoMemory: true          # auto-memory switch: false = no more reminders
 ```
 
 ## Requirements

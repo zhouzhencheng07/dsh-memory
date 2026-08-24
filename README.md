@@ -4,13 +4,13 @@
 
 面向 DeepSeek Harness (dsh) 的**跨会话全局记忆插件**。
 
-主 agent 每轮判定是否有值得跨会话保留的内容：**每轮 system prompt 提醒**（"本轮有值得跨会话保留的新内容时，必须使用 memory 工具"——`autoMemory: false` 可关）把时机指给**路径定位型 `memory` 工具**——它返回今日记忆文件路径（不存在自动创建，同时维护会话来源注释），之后用**原生 read/write/edit 工具**维护笔记本身；捕获时机与内容要求全部写在 `memory` 工具描述里（随工具 schema 每个请求下发）。`memory_search` 工具对这些笔记做**块级检索**（可选向量融合、按日衰减）。官方 bundle 插件形态（`dsh.bundle`），0 patch、**零 npm 依赖、零构建**——`@deepseek-ai/*` 由 dsh 运行时扁平 fallback 提供，与运行实例共享同一份包。
+主 agent 每轮判定是否有值得跨会话保留的内容：**每轮 system prompt 提醒**（"When this turn produced something worth keeping across sessions, you MUST use the memory tool."——`autoMemory: false` 可关）把时机指给**路径定位型 `memory` 工具**——它返回今日记忆文件路径（不存在自动创建，同时维护会话来源注释），之后用**原生 read/write/edit 工具**维护笔记本身；捕获时机与内容要求全部写在 `memory` 工具描述里（随工具 schema 每个请求下发）。`memory_search` 工具对这些笔记做**块级检索**（可选向量融合、按日衰减）。官方 bundle 插件形态（`dsh.bundle`），0 patch、**零 npm 依赖、零构建**——`@deepseek-ai/*` 由 dsh 运行时扁平 fallback 提供，与运行实例共享同一份包。
 
 ## 能力
 
 | 能力 | 说明 |
 |---|---|
-| **每轮提醒（可关）** | 短 system-prompt 提醒，每次请求重新组装："本轮有值得跨会话保留的新内容时，必须使用 memory 工具"。刻意极短——时机、内容要求、用法全部放在 `memory` 工具描述；`autoMemory: false` 关闭后走"仅在要求时记录"路线，中性的 `memory` 工具照常可用 |
+| **每轮提醒（可关）** | 短 system-prompt 提醒（英文，对齐官方提示词口径），每次请求重新组装："When this turn produced something worth keeping across sessions, you MUST use the memory tool."。刻意极短——时机、内容要求、用法全部放在 `memory` 工具描述；`autoMemory: false` 关闭后走"仅在要求时记录"路线，中性的 `memory` 工具照常可用 |
 | **memory 工具** | **无参数路径定位器**：返回本工作区今日记忆文件（每工作区每天一个）；文件不存在时**自动创建**（内容=首行 `<!-- 会话来源: ... -->` 注释），存在时把当前会话合并进来源注释（**精确幂等**，已含则零写）。描述承载捕获时机（决策及原因、偏好/纠正/约定、踩坑与修复、可复用命令/流程、状态变化）与质量规则（先读后改；edit 局部修改、write 新建/整文件重写；`#` 标题组织主题、同类合并、过时一两句修正、不写流水账）。文件操作**透传宿主原生 read/write 管线**——与模型自己的文件工具同一套沙箱栅栏与"改前必读"观察（`$DSH_HOME` 写入需要 danger-full-access） |
 | **memory_search 工具** | 标题感知块级检索（任意标题切块、带面包屑）、**两组关键词加分**（2026-08-24）：`primary` ≤2 个高权重（每个命中 ×3）+ `secondary` ≤3 个低权重（每个命中 ×1），逐词部分分、无硬 AND 门禁——块里缺某个词不再整条消失；去格式符宽容匹配、命中数按块长归一、**按日衰减**（30 天半衰、下限 0.4）；snippet 返回整个块（≤1000 字符，通常无需再开文件） |
 | **两层记忆库（2026-08-24）** | 日记层 `YYYY-MM-DD/`（流水，**硬窗口** `dailyWindowDays` 默认 90 天——过期笔记不再参与检索但保留在磁盘；0=不限）+ 长期层 `memory/memory.md`（单文件按主题标题组织，**永不衰减、不受窗口限制**）。检索时按结果组成给条件提示：命中长期层→与旧日记冲突以它为准，就地修正过时并补充缺失事实；只命中较旧日记→建议把长期有效的事实补充进 memory.md（**旧日记自身不做维护**，衰减到期自然出窗；今日笔记的修正归 `memory` 工具管）。长期块未进榜时最后一席**保底让位**给它（limit ≥ 2 时）。无计数器、零状态文件 |

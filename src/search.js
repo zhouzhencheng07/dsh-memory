@@ -219,7 +219,7 @@ export function blockSnippet(text, query) {
   const t = String(text ?? '').trim()
   if (t.length <= SNIPPET_FULL) return t
   const win = snippet(t, query)
-  return `${win}\n（块共 ${t.length} 字符，仅截取命中片段；需要更多内容再查看源文件）`
+  return `${win}\n(block is ${t.length} chars; only the hit-centered excerpt is shown — open the source file for more)`
 }
 
 /**

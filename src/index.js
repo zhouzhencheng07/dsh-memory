@@ -169,12 +169,12 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
       //     the `memory` tool's business.
       if (hits.length > 0) {
         if (hits.some(isLongterm)) {
-          out += `\n提示：以上含长期记忆（${LONGTERM_REL}）——与旧日记冲突时以它为准；发现其中表述过时就地更新对应主题块，尚缺的长期事实也一并补充进去（先读后改）。`
+          out += '\nNote: results include long-term memory (memory/memory.md) — on conflicts with older diary notes it wins; fix outdated statements in the matching topic blocks and supplement missing lasting facts there (read before edit).'
         } else {
           const agedMs = Date.now() - PROMOTION_HINT_MIN_AGE_DAYS * 86400000
           const hasAged = hits.some((h) => { const ms = Date.parse(String(h.date ?? '')); return Number.isFinite(ms) && ms < agedMs })
           if (hasAged) {
-            out += `\n提示：若以上有应长期生效的事实（用户偏好、环境事实、长期约定、反复踩的坑），可补充到 ${LONGTERM_REL} 对应主题块（先读后改）；旧日记本身不做维护，到期自然不再参与检索。`
+            out += '\nNote: if the above contains facts that should last (user preferences, environment facts, standing conventions, recurring pitfalls), add them to the matching topic block in memory/memory.md (read before edit); old diaries get no maintenance — they simply age out.'
           }
         }
       }
@@ -330,7 +330,7 @@ export function apply(ctx) {
           const session = context.agent?.session
           if (!session?.id) return ''
           if ((session.header?.delegationDepth ?? 0) > 0) return ''
-          return '【自动记忆】本轮有值得跨会话保留的新内容时，必须使用 memory 工具。'
+          return 'When this turn produced something worth keeping across sessions, you MUST use the memory tool.'
         },
       })
     })

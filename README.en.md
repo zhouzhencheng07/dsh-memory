@@ -24,7 +24,7 @@ shares one package instance.
 |---|---|
 | **Per-turn reminder (optional)** | A short system-prompt reminder assembled on every request: "when this turn has something worth keeping across sessions, you MUST use the memory tool". Deliberately terse — the timing, content rules, and usage live in the `memory` tool description. Turn it off with `autoMemory: false` for a "record only when asked" style; the neutral `memory` tool stays usable |
 | **memory tool** | A path locator with **no arguments**: returns today's memory note for this workspace (one file per workspace per day). When the file is absent it is **created** (content = the `<!-- 会话来源: ... -->` session-source comment); when present the calling session is merged into that comment (exactly idempotent). The description carries the capture timing (decisions and reasons, user corrections/conventions, pitfalls and fixes, reusable commands/processes, state changes) and the quality rules (read before modify; edit local changes, write to create/replace the whole file; # headings per topic, merge related topics, fix outdated items in a sentence or two, no play-by-play). All file work dispatches the host's **native read/write pipeline** — same sandbox fence and read-before-modify observation as the model's own file tools (`$DSH_HOME` writes need danger-full-access) |
-| **memory_search tool** | Heading-aware block-level retrieval (any heading splits a block, breadcrumbs included), tiered keyword matching (exact ×1.0 → formatting-tolerant ×0.95 → multi-keyword AND ×0.7 — fuzziness allowed but scored down, exact always wins), **per-day decay** (30-day half-life, floor 0.4 — older notes rank lower but never vanish), snippets return whole blocks (≤1000 chars, usually no need to open the file) |
+| **memory_search tool** | Heading-aware block-level retrieval (any heading splits a block, breadcrumbs included), **two-group keyword scoring** (2026-08-24): `primary` ≤2 keywords at high weight (×3 each hit) + `secondary` ≤3 at low weight (×1 each) — partial credit per matched keyword, no hard AND gate (a block missing some words no longer vanishes); formatting-tolerant matching (backticks/quotes/bold marks never break a hit), occurrence counts normalized by block length, **per-day decay** (30-day half-life, floor 0.4 — older notes rank lower but never vanish); snippets return whole blocks (≤1000 chars, usually no need to open the file) |
 | **Vector fusion (optional)** | With an Ollama-compatible embedding service configured, upgrades automatically to keyword + vector RRF fusion (k=60); falls back to pure keyword matching when the service is down — `memory_search` never fails because of vectors |
 | **Config card** | Settings → Plugins → Plugin config → Memory; hot-reloads on save (persisted to settings.yaml, no restart) |
 
@@ -79,9 +79,12 @@ commits).
   called the `memory` tool, so its source is already maintained
 - `src/search.js`: any heading (`#`–`######`) is a chunk boundary and
   subsections become standalone blocks with ancestor breadcrumbs;
-  tiered keyword matching — whole-query literal ×1.0 → formatting-tolerant
-  literal (backticks/quotes/bold marks stripped, identifiers kept) ×0.95 →
-  multi-keyword AND fallback ×0.7, occurrence counts normalized by block
+  **two-group keyword scoring** — `primary` (≤2, essential terms) scores ×3
+  per hit, `secondary` (≤3, refining terms) ×1, partial credit per matched
+  keyword (2026-08-24, replacing the old tier scheme whose tier-3 hard AND
+  zeroed blocks matching only some words — the measured root cause of
+  misses); both sides go through `looseNormalize` (formatting marks stripped,
+  identifiers `-` `_` `.` kept); the weighted count is normalized by block
   length; each block's score is multiplied by `max(0.4, 0.5^(days/30))`
   (per-day decay); exact dedup via `rel#breadcrumb`
 - `src/embed.js`: optional vector path — in-memory index with sha1 signature
@@ -104,8 +107,10 @@ commits).
 ## Usage
 
 ```sh
-# model-side tool: search the memory library (older notes rank lower but stay reachable)
-memory_search query="vector search threshold"
+# model-side tool: search the memory library (two keyword groups: primary ≤2
+# high-weight, secondary ≤3 low-weight; partial credit per matched keyword —
+# older notes rank lower but stay reachable, newer notes win)
+memory_search primary="vector search threshold" secondary="embedding"
 
 # model-side tool: locate today's memory note — returns the path, creates the
 # file (with the source comment) when absent, merges this session into the

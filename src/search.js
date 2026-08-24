@@ -22,6 +22,28 @@
 // while a newer note on the same topic outranks it unless the old one is
 // much stronger. The digest/dream layer is gone; recency guidance + decay
 // replace its convergence job.
+//
+// TWO-GROUP KEYWORD SCORING (user decision 2026-08-24): the caller gives
+// keywords in TWO groups with different score weights — `primary` (max 2,
+// the essential terms, ×PRIMARY_WEIGHT each) and `secondary` (max 3,
+// refining/context terms, ×SECONDARY_WEIGHT each). Every keyword that
+// literally appears in a block (formatting-tolerant via looseNormalize)
+// contributes its weighted occurrence count — PARTIAL credit, no hard AND
+// gate. This replaces the old tier-1/2/3 scheme (whole-phrase ×1.0 →
+// tolerant ×0.95 → multi-keyword AND ×0.7): the measured root cause of
+// misses (2026-08-24 diagnosis) was tier 3's zero partial credit — a block
+// containing some but not all query words scored nothing and vanished from
+// the keyword list. Counts are damped by block length (BM25-style), then
+// multiplied by the note's recency decay weight.
+
+/** Cap on group-1 (`primary`) keywords: the essential terms. */
+export const MAX_PRIMARY_KEYWORDS = 2
+/** Cap on group-2 (`secondary`) keywords: refining/context terms. */
+export const MAX_SECONDARY_KEYWORDS = 3
+/** Per-keyword score bonus for a primary-group hit (high). */
+export const PRIMARY_WEIGHT = 3
+/** Per-keyword score bonus for a secondary-group hit (low). */
+export const SECONDARY_WEIGHT = 1
 
 /** Max chars of a returned snippet window (oversized-block fallback). */
 export const SNIPPET_CHARS = 200
@@ -71,6 +93,40 @@ export function recencyWeight(date) {
   const days = Math.max(0, (Date.now() - ms) / 86400000)
   const w = Math.pow(0.5, days / RECENCY_HALF_LIFE_DAYS)
   return Math.max(RECENCY_FLOOR, w)
+}
+
+/**
+ * Parse the two keyword groups for memory_search: whitespace-split,
+ * looseNormalize'd, deduped (a token counts once, at its highest group —
+ * primary wins), and capped to MAX_PRIMARY_KEYWORDS / MAX_SECONDARY_KEYWORDS.
+ * Keywords dropped by the caps are reported in `notices` so the tool output
+ * can tell the calling model its input was trimmed.
+ * @param {string} primaryInput - raw `primary` argument (max 2 keywords)
+ * @param {string} secondaryInput - raw `secondary` argument (max 3 keywords)
+ * @returns {{primary: string[], secondary: string[], notices: string[]}}
+ */
+export function parseKeywordGroups(primaryInput, secondaryInput) {
+  const notices = []
+  const seen = new Set() // cross-group dedupe, first occurrence (primary) wins
+  const take = (input, cap, label) => {
+    const kept = []
+    const dropped = []
+    for (const raw of String(input ?? '').split(/\s+/).filter(Boolean)) {
+      const word = looseNormalize(raw)
+      if (!word || seen.has(word)) continue
+      if (kept.length >= cap) {
+        dropped.push(raw)
+        continue
+      }
+      seen.add(word)
+      kept.push(word)
+    }
+    if (dropped.length > 0) notices.push(`${label} capped to ${cap} keywords (dropped: ${dropped.join(', ')})`)
+    return kept
+  }
+  const primary = take(primaryInput, MAX_PRIMARY_KEYWORDS, 'primary')
+  const secondary = take(secondaryInput, MAX_SECONDARY_KEYWORDS, 'secondary')
+  return { primary, secondary, notices }
 }
 
 /** Non-overlapping count of `needle` occurrences in `value` (case-insensitive). */
@@ -167,32 +223,31 @@ export function blockSnippet(text, query) {
 }
 
 /**
- * Search memory entries for a query at BLOCK level, with TIERED keyword
- * matching (user decision 2026-08-22: fuzziness allowed, but scored down —
- * exact always outranks fuzzy):
- *   tier 1 (×1.0): literal substring of the whole query (as before);
- *   tier 2 (×0.95): formatting-tolerant literal — both sides passed through
- *     looseNormalize(), so backticks/quotes/bold marks between the keywords
- *     no longer break the hit (still a whole-phrase match — memory search is
- *     about text content, so this ranks nearly as high as exact);
- *   tier 3 (×0.7): multi-keyword AND fallback — the query is split on
- *     whitespace and every chunk must appear in the block (order-free);
- *     raw count = min occurrences across chunks.
- * Every heading-aware block of every entry is a candidate hit (`rel#面包屑`);
- * raw occurrence counts are damped by block length (BM25-style, relative to
- * the corpus average block length), multiplied by the tier weight, then by
- * the note's recency decay weight (old notes recede but never drop below the
- * floor). Title-only blocks are skipped (mirroring the vector index, which
- * also skips them).
- * Ties break by date (newer first), then path.
+ * Search memory entries at BLOCK level with TWO-GROUP keyword scoring
+ * (user decision 2026-08-24): every keyword that literally appears in a
+ * block adds `PRIMARY_WEIGHT` / `SECONDARY_WEIGHT` (by group) times its
+ * occurrence count — partial credit, no hard AND gate, so a block matching
+ * only some keywords still surfaces (ranked by how much it did match).
+ * Matching is formatting-tolerant: both sides go through looseNormalize(),
+ * so backticks/quotes/bold marks never break a hit (identifier characters
+ * `-` `_` `.` survive whole). The summed weighted count is damped by block
+ * length (BM25-style, relative to the corpus average block length), then
+ * multiplied by the note's recency decay weight (old notes recede but never
+ * drop below the floor). Title-only blocks are skipped (mirroring the vector
+ * index). Ties break by date (newer first), then path.
+ *
+ * Keywords are expected pre-parsed via parseKeywordGroups() (capped and
+ * deduped); they are re-normalized defensively here.
  * @param {Array<{rel: string, date: string, kind: string, text: string}>} entries
- * @param {string} query - non-empty search text
+ * @param {string[]} primaryKeywords - group-1 keywords (essential, high bonus)
+ * @param {string[]} secondaryKeywords - group-2 keywords (refining, low bonus)
  * @param {number} [limit=5]
  * @returns {Array<{rel: string, date: string, kind: string, score: number, snippet: string}>}
  */
-const TIER_WEIGHTS = { 1: 1, 2: 0.95, 3: 0.7 }
-
-export function searchMemory(entries, query, limit = 5) {
+export function searchMemory(entries, primaryKeywords = [], secondaryKeywords = [], limit = 5) {
+  const primary = (primaryKeywords ?? []).map(looseNormalize).filter(Boolean)
+  const secondary = (secondaryKeywords ?? []).map(looseNormalize).filter(Boolean)
+  if (primary.length === 0 && secondary.length === 0) return []
   const blocks = []
   for (const entry of entries) {
     for (const s of splitBlocks(entry.text ?? '')) {
@@ -203,39 +258,30 @@ export function searchMemory(entries, query, limit = 5) {
   }
   const totalLen = blocks.reduce((sum, b) => sum + b.block.text.length, 0)
   const avgLen = Math.max(1, totalLen / Math.max(1, blocks.length))
-  const qLoose = looseNormalize(query)
-  const chunks = qLoose ? qLoose.split(' ') : []
+  const groups = [[PRIMARY_WEIGHT, primary], [SECONDARY_WEIGHT, secondary]]
   const hits = []
   for (const { entry, block } of blocks) {
-    const text = block.text
-    // tiered match: exact literal → formatting-tolerant literal → AND chunks
-    let raw = occurrenceCount(text, query)
-    let tier = 1
-    let src = text
-    let needle = query
-    if (raw === 0 && qLoose) {
-      const looseText = looseNormalize(text)
-      raw = occurrenceCount(looseText, qLoose)
-      if (raw > 0) {
-        tier = 2
-        src = looseText
-        needle = qLoose
-      } else if (chunks.length > 1 && chunks.every((c) => looseText.includes(c))) {
-        tier = 3
-        raw = Math.min(...chunks.map((c) => occurrenceCount(looseText, c)))
-        src = looseText
-        needle = chunks.find((c) => looseText.includes(c))
+    // one tolerant view per block; every keyword scores against it
+    const looseText = looseNormalize(block.text)
+    let weighted = 0
+    let needle = ''
+    for (const [weight, keywords] of groups) {
+      for (const keyword of keywords) {
+        const occ = occurrenceCount(looseText, keyword)
+        if (occ === 0) continue
+        weighted += weight * occ
+        if (!needle) needle = keyword // snippet window centers on the first hit
       }
     }
-    if (raw === 0) continue
-    const lenNorm = raw / (1 + text.length / avgLen)
-    const score = lenNorm * recencyWeight(entry.date) * TIER_WEIGHTS[tier]
+    if (weighted === 0) continue
+    const lenNorm = weighted / (1 + block.text.length / avgLen)
+    const score = lenNorm * recencyWeight(entry.date)
     hits.push({
       rel: block.title ? `${entry.rel}#${block.title}` : entry.rel,
       date: entry.date,
       kind: entry.kind,
       score,
-      snippet: blockSnippet(src, needle),
+      snippet: blockSnippet(looseText, needle),
     })
   }
   hits.sort((a, b) => {

@@ -6,8 +6,10 @@
 // Design (agreed with the user, 2026-08-16/17/18/22/25):
 //   - memory = reusable experience reference (decisions, pitfalls, ideas),
 //     NOT a project archive; project detail lives in the workspace docs.
-//   - retrieval: memory_search over the daily notes (block-level, substring +
-//     optional vector, recency-weighted). The digest/dream layer was REMOVED
+//   - retrieval: memory_search over the daily notes (block-level; TWO-GROUP
+//     keyword scoring 2026-08-24 — primary ≤2 ×3, secondary ≤3 ×1, partial
+//     credit per matched keyword, no hard AND gate — plus optional vector,
+//     recency-weighted). The digest/dream layer was REMOVED
 //     (2026-08-18, user decision): memory notes are edited in place and carry
 //     their date in the rel, so recency guidance ("newer notes win conflicts,
 //     older notes still hold details") plus a recency decay in ranking covers
@@ -54,7 +56,7 @@ import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-sett
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { CallId } from '@deepseek-ai/dsh-llm'
 import { memoryRoot, mergeProvenance, readMemoryFile, sessionSlug, todayStamp, walkMemory } from './store.js'
-import { formatHits, fuseHits, searchMemory } from './search.js'
+import { formatHits, fuseHits, parseKeywordGroups, searchMemory } from './search.js'
 import { EmbeddingClient, VectorIndex } from './embed.js'
 
 export const name = 'dsh-memory'
@@ -92,6 +94,9 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
     name: 'memory_search',
     description:
       'Search the memory library: daily notes (memory/) only. ' +
+      'Give keywords in TWO groups with different score bonuses: `primary` (max 2 keywords — the essential terms, high bonus) and `secondary` (max 3 — refining/context terms, low bonus); ' +
+      'every keyword that literally appears in a block adds its bonus (partial credit, no hard AND gate), so pick rare tokens actually written in the notes (file names, commands, proper nouns) rather than synonyms; ' +
+      'extras beyond the caps are dropped with a note. Chinese or English both work; formatting marks like backticks/quotes are tolerated. ' +
       'Returns BLOCK-level hits: rel carries the multi-level breadcrumb (file#主题 > 小节 > 子节, any heading level starts its own block), and each snippet is the WHOLE block text (up to ~1000 chars) — ' +
       'usually enough to continue without opening the file; read the source only when the block is truncated or more context is needed. ' +
       'The rel embeds the note date (YYYY-MM-DD/...): when several hits bear on the same topic, prefer the NEWER note (it reflects the latest state); ' +
@@ -99,26 +104,27 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
       'Ranking already discounts older notes (recency decay), so older but still relevant blocks remain reachable. ' +
       'When embeddingBaseUrl is configured, vector search is fused with keyword hits automatically (unified RRF score).',
     parameters: {
-      query: { type: 'string', required: true, description: 'Search keywords (Chinese or English); formatting marks like backticks/quotes are tolerated, and multiple whitespace-separated keywords are AND-matched' },
+      primary: { type: 'string', required: true, description: 'Group-1 keywords, max 2, whitespace-separated — essential terms that a relevant note most likely contains verbatim' },
+      secondary: { type: 'string', description: 'Group-2 keywords, max 3, whitespace-separated — refining/context terms that add a small bonus each; omit when unnecessary' },
     },
     output: {
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     async execute(args) {
-      const query = String(args.query ?? '').trim()
-      if (!query) throw new Error('memory_search: query is empty')
+      const kw = parseKeywordGroups(String(args.primary ?? ''), String(args.secondary ?? ''))
+      if (kw.primary.length === 0 && kw.secondary.length === 0) throw new Error('memory_search: no usable keywords in primary/secondary')
       // Result count is locked to the configured searchLimit (user decision
       // 2026-08-22): no agent-facing override.
       const limit = Math.min(Math.max(Number(getConfig().searchLimit) || 5, 1), MAX_LIMIT)
       const entries = walkMemory()
       // gather extra candidates from each signal so the fusion has room to rank
-      const sub = searchMemory(entries, query, Math.min(limit * 3, MAX_LIMIT * 3))
+      const sub = searchMemory(entries, kw.primary, kw.secondary, Math.min(limit * 3, MAX_LIMIT * 3))
       let hits = sub.slice(0, limit)
       const index = getVectorIndex()
       if (index !== null) {
         try {
-          const vec = await index.query(entries, query, limit * 3)
+          const vec = await index.query(entries, [...kw.primary, ...kw.secondary].join(' '), limit * 3)
           hits = fuseHits(sub, vec, limit)
         } catch (error) {
           // vector search is best-effort: a broken embedding service falls
@@ -126,7 +132,9 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
           console.warn(`dsh-memory: vector search unavailable (${error?.message ?? String(error)}), using substring results`)
         }
       }
-      return formatHits(hits)
+      // tell the calling model when its input was trimmed, so the next call
+      // respects the caps (primary ≤ 2, secondary ≤ 3)
+      return kw.notices.length > 0 ? `${kw.notices.join('; ')}\n${formatHits(hits)}` : formatHits(hits)
     },
   }
 }

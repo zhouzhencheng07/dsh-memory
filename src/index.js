@@ -113,7 +113,7 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
       'every keyword that literally appears in a block adds its bonus (partial credit, no hard AND gate), so pick rare tokens actually written in the notes (file names, commands, proper nouns) rather than synonyms; ' +
       'extras beyond the caps are dropped with a note. Chinese or English both work; formatting marks like backticks/quotes are tolerated. ' +
       'The library has TWO layers: recent daily notes (only the last N days participate — dailyWindowDays) and the long-term file memory/memory.md organized by topic headings (never decays, always searchable). ' +
-      'When results contain memory/memory.md blocks they are authoritative over conflicting older diary notes — fix outdated statements there in place; when a diary hit carries lasting value (user preferences, environment facts, standing conventions, recurring pitfalls), promote it into memory/memory.md. ' +
+      'When results contain memory/memory.md blocks they are authoritative over conflicting older diary notes — fix outdated statements there and supplement missing lasting facts in place; when NO long-term block makes the list, the last result slot is reserved for the best-ranking one (with limit ≥ 2). Older diaries get no maintenance — they decay and age out on their own. ' +
       'Returns BLOCK-level hits: rel carries the multi-level breadcrumb (file#主题 > 小节 > 子节, any heading level starts its own block), and each snippet is the WHOLE block text (up to ~1000 chars) — ' +
       'usually enough to continue without opening the file; read the source only when the block is truncated or more context is needed. ' +
       'The rel embeds the note date (YYYY-MM-DD/...): when several hits bear on the same topic, prefer the NEWER note (it reflects the latest state); ' +
@@ -136,45 +136,56 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
       const limit = Math.min(Math.max(Number(getConfig().searchLimit) || 5, 1), MAX_LIMIT)
       const windowDays = Math.max(0, Math.floor(Number(getConfig().dailyWindowDays) || 0))
       const entries = walkMemory(windowDays)
-      // gather extra candidates from each signal so the fusion has room to rank
-      const sub = searchMemory(entries, kw.primary, kw.secondary, Math.min(limit * 3, MAX_LIMIT * 3))
-      let hits = sub.slice(0, limit)
+      // gather a candidate pool several times the result window so fusion and
+      // the long-term reservation have room to rank
+      const poolSize = Math.min(limit * 3, MAX_LIMIT * 3)
+      const sub = searchMemory(entries, kw.primary, kw.secondary, poolSize)
       const index = getVectorIndex()
+      let fused = null
       if (index !== null) {
         try {
-          const vec = await index.query(entries, [...kw.primary, ...kw.secondary].join(' '), limit * 3)
-          hits = fuseHits(sub, vec, limit)
+          const vec = await index.query(entries, [...kw.primary, ...kw.secondary].join(' '), poolSize)
+          fused = fuseHits(sub, vec, poolSize)
         } catch (error) {
           // vector search is best-effort: a broken embedding service falls
           // back to pure substring results instead of failing the tool
           console.warn(`dsh-memory: vector search unavailable (${error?.message ?? String(error)}), using substring results`)
         }
       }
+      let hits = (fused ?? sub).slice(0, limit)
+      // Long-term reservation (user decision 2026-08-24): when the window has
+      // room (limit ≥ 2 — never evict a sole result) and no memory/ block
+      // made the cut, the LAST slot yields to the best-ranking long-term
+      // block from the pool. Evergreen facts must surface even when fresher
+      // diary noise outscores them.
+      const isLongterm = (h) => String(h?.rel ?? '').startsWith(LONGTERM_DIR_PREFIX)
+      if (limit >= 2 && !hits.some(isLongterm)) {
+        const reserve = (fused ?? sub).slice(limit).find(isLongterm)
+        if (reserve) hits[limit - 1] = reserve
+      }
       // tell the calling model when its input was trimmed, so the next call
       // respects the caps (primary ≤ 2, secondary ≤ 3)
       let out = formatHits(hits)
       if (kw.notices.length > 0) out = `${kw.notices.join('; ')}\n${out}`
       // Long-term layer etiquette (user decision 2026-08-24): promotion and
-      // in-place correction are considered AT RETRIEVAL TIME — the moment a
-      // note is reused is the only moment worth acting on. The hints are
-      // computed from the RESULT COMPOSITION (no hit counters, no state):
+      // in-place correction are considered AT RETRIEVAL TIME, computed from
+      // the RESULT COMPOSITION (no counters, no state):
       //   - long-term blocks participated → they win conflicts; fix stale
-      //     statements there;
-      //   - diary-only results with aged hits → suggest promoting lasting
-      //     facts into memory/memory.md (fresh same-day diaries stay quiet).
+      //     statements there and supplement missing lasting facts;
+      //   - diary-only results with aged hits → suggest supplementing
+      //     memory/memory.md. Old diaries themselves get NO maintenance —
+      //     they decay and age out on their own; same-day corrections are
+      //     the `memory` tool's business.
       if (hits.length > 0) {
-        const hasLongterm = hits.some((h) => String(h.rel ?? '').startsWith(LONGTERM_DIR_PREFIX))
-        if (hasLongterm) {
-          out += `\n提示：以上含长期记忆（${LONGTERM_REL}）——与旧日记冲突时以它为准；发现其内容过时，就地更新对应主题块（先读后改）。`
+        if (hits.some(isLongterm)) {
+          out += `\n提示：以上含长期记忆（${LONGTERM_REL}）——与旧日记冲突时以它为准；发现其中表述过时就地更新对应主题块，尚缺的长期事实也一并补充进去（先读后改）。`
         } else {
           const agedMs = Date.now() - PROMOTION_HINT_MIN_AGE_DAYS * 86400000
           const hasAged = hits.some((h) => { const ms = Date.parse(String(h.date ?? '')); return Number.isFinite(ms) && ms < agedMs })
           if (hasAged) {
-            out += `\n提示：若以上有应长期生效的事实（用户偏好、环境事实、长期约定、反复踩的坑），可固化到 ${LONGTERM_REL} 的对应主题块（先读后改；日记原件不必改动，到期自然不再参与检索）。`
+            out += `\n提示：若以上有应长期生效的事实（用户偏好、环境事实、长期约定、反复踩的坑），可补充到 ${LONGTERM_REL} 对应主题块（先读后改）；旧日记本身不做维护，到期自然不再参与检索。`
           }
         }
-      } else if (windowDays > 0) {
-        out += `\n（当前仅检索最近 ${windowDays} 天的日记与全部长期记忆 ${LONGTERM_REL}）`
       }
       return out
     },
@@ -227,7 +238,7 @@ function memoryLocatorTool(ctx) {
     description:
       "Returns today's cross-session memory note path for this workspace (one markdown file per workspace per day; created automatically and tagged with the session source when missing — the leading <!-- 会话来源: ... --> comment is maintained for you). " +
       'Maintain the note with the NATIVE read/write/edit tools: read first, then edit local changes or write to create/replace the whole file. ' +
-      'Content rules: only record experience worth reusing across sessions — decisions and their reasons, user preferences/corrections/conventions, pitfalls and how they were fixed, reusable commands or processes, state changes; organize topics with # headings, merge related topics instead of duplicating, correct outdated items in a sentence or two, no play-by-play.',
+      'Content rules: only record experience worth reusing across sessions — decisions and their reasons, user preferences/corrections/conventions, pitfalls and how they were fixed, reusable commands or processes, state changes; organize topics with # headings, merge related topics instead of duplicating, correct outdated statements in THIS note in place — today\'s note is the one place for same-day corrections (older diaries simply age out; lasting facts belong in memory/memory.md via search-time prompts), no play-by-play.',
     parameters: {},
     output: {
       schema: { type: 'string' },

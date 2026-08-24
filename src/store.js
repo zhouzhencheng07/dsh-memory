@@ -7,6 +7,18 @@
 //                                                     one daily file per
 //                                                     workspace; topics are
 //                                                     `#` first-level headings
+//   $DSH_HOME/dsh-memory/memory/memory.md             LONG-TERM memory: ONE
+//                                                     file organized by topic
+//                                                     headings (user decision
+//                                                     2026-08-24). The dir name
+//                                                     is not a date, so it is
+//                                                     exempt from both the
+//                                                     recency decay and the
+//                                                     daily hard window —
+//                                                     walkMemory indexes any
+//                                                     subdirectory, so this
+//                                                     layer needs zero extra
+//                                                     code.
 //
 // The directory is named `dsh-memory` (not `memory`) on purpose: if the
 // harness ever ships its own memory feature it will likely use `memory`.
@@ -135,17 +147,31 @@ export function mergeProvenance(text, sessionId) {
 }
 
 /**
- * Walk every markdown file under the memory root (the only layer — the
- * digest/dream layers were removed 2026-08-18). rel paths use forward
- * slashes and are relative to memoryRoot() (YYYY-MM-DD/<topic>.md).
+ * Walk every markdown file under the memory root. Two layers:
+ *   - dated subdirectories (YYYY-MM-DD/<topic>.md): the ephemeral daily
+ *     layer — when `windowDays` > 0, directories whose name parses as a date
+ *     OLDER than the window are skipped (hard window, user decision
+ *     2026-08-24: too-old diaries leave the searchable corpus but stay on
+ *     disk). The window applies ONLY to parseable dates.
+ *   - any other subdirectory (in practice `memory/memory.md`, the long-term
+ *     file): never windowed; its unparseable "date" also makes recencyWeight
+ *     return 1 — no decay, always reachable.
+ * rel paths use forward slashes relative to memoryRoot()
+ * (YYYY-MM-DD/<topic>.md or memory/memory.md).
+ * @param {number} [windowDays=0] - hard window for dated notes in days; 0 disables it
  * @returns {Array<{rel: string, date: string, kind: 'note', text: string}>}
  */
-export function walkMemory() {
+export function walkMemory(windowDays = 0) {
   const out = []
   const root = memoryRoot()
   if (!existsSync(root) || !statSync(root).isDirectory()) return out
+  const cutoff = Number(windowDays) > 0 ? Date.now() - Number(windowDays) * 86400000 : null
   for (const day of readdirSync(root, { withFileTypes: true })) {
     if (!day.isDirectory()) continue
+    // hard window: only directory names that PARSE as dates can age out;
+    // `memory/` (and any other non-date dir) is always indexed
+    const ms = cutoff !== null ? Date.parse(day.name) : NaN
+    if (cutoff !== null && Number.isFinite(ms) && ms < cutoff) continue
     // YYYY-MM-DD/<topic>.md
     const dir = join(root, day.name)
     for (const inner of readdirSync(dir, { withFileTypes: true })) {

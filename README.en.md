@@ -24,7 +24,8 @@ shares one package instance.
 |---|---|
 | **Per-turn reminder (optional)** | A short system-prompt reminder assembled on every request: "when this turn has something worth keeping across sessions, you MUST use the memory tool". Deliberately terse — the timing, content rules, and usage live in the `memory` tool description. Turn it off with `autoMemory: false` for a "record only when asked" style; the neutral `memory` tool stays usable |
 | **memory tool** | A path locator with **no arguments**: returns today's memory note for this workspace (one file per workspace per day). When the file is absent it is **created** (content = the `<!-- 会话来源: ... -->` session-source comment); when present the calling session is merged into that comment (exactly idempotent). The description carries the capture timing (decisions and reasons, user corrections/conventions, pitfalls and fixes, reusable commands/processes, state changes) and the quality rules (read before modify; edit local changes, write to create/replace the whole file; # headings per topic, merge related topics, fix outdated items in a sentence or two, no play-by-play). All file work dispatches the host's **native read/write pipeline** — same sandbox fence and read-before-modify observation as the model's own file tools (`$DSH_HOME` writes need danger-full-access) |
-| **memory_search tool** | Heading-aware block-level retrieval (any heading splits a block, breadcrumbs included), **two-group keyword scoring** (2026-08-24): `primary` ≤2 keywords at high weight (×3 each hit) + `secondary` ≤3 at low weight (×1 each) — partial credit per matched keyword, no hard AND gate (a block missing some words no longer vanishes); formatting-tolerant matching (backticks/quotes/bold marks never break a hit), occurrence counts normalized by block length, **per-day decay** (30-day half-life, floor 0.4 — older notes rank lower but never vanish); snippets return whole blocks (≤1000 chars, usually no need to open the file) |
+| **memory_search tool** | Heading-aware block-level retrieval (any heading splits a block, breadcrumbs included), **two-group keyword scoring** (2026-08-24): `primary` ≤2 keywords at high weight (×3 each hit) + `secondary` ≤3 at low weight (×1 each) — partial credit per matched keyword, no hard AND gate (a block missing some words no longer vanishes); formatting-tolerant matching, occurrence counts normalized by block length, **per-day decay** (30-day half-life, floor 0.4); snippets return whole blocks (≤1000 chars, usually no need to open the file) |
+| **Two-layer library (2026-08-24)** | Diary layer `YYYY-MM-DD/` (ephemeral, **hard window** `dailyWindowDays` default 90 days — aged notes leave the searchable corpus but stay on disk; 0 = unlimited) + long-term layer `memory/memory.md` (ONE file organized by topic headings, **never decays, never windowed**). At query time, composition-based hints: long-term blocks in the results → they win conflicts and stale statements get fixed in place; diary-only results with aged hits → suggest promoting lasting facts into memory.md; same-day diaries stay quiet. No hit counters, zero state files |
 | **Vector fusion (optional)** | With an Ollama-compatible embedding service configured, upgrades automatically to keyword + vector RRF fusion (k=60); falls back to pure keyword matching when the service is down — `memory_search` never fails because of vectors |
 | **Config card** | Settings → Plugins → Plugin config → Memory; hot-reloads on save (persisted to settings.yaml, no restart) |
 
@@ -38,13 +39,21 @@ untouched:
 
 ```
 $DSH_HOME/dsh-memory/
+├── memory/
+│   └── memory.md           # long-term memory: ONE file organized by topic headings, never decays, never windowed
 └── YYYY-MM-DD/
-    └── <workspace-slug>.md   # one file per workspace per day, normal markdown headings
+    └── <workspace-slug>.md # one file per workspace per day (diary layer, subject to the search window)
 ```
 
-- **No state files**: no watermarks or turn counters; the date is resolved when
-  the `memory` tool runs and rolls over to the new day's file automatically at
-  midnight
+- **Two-layer semantics**: today's work goes to the diary; lasting facts
+  (user preferences, environment facts, standing conventions) are promoted by
+  the agent into `memory/memory.md` topic blocks AT REUSE TIME — when a search
+  surfaces them (read-before-edit; outdated statements are corrected in place,
+  so the single source of truth converges in that one file). Diary originals
+  are never rewritten back; they simply age out of the window.
+- **No state files**: no watermarks, turn counters, or hit counters; dates and
+  the window are resolved at query time and roll over to the new day's file
+  automatically at midnight
 - rel paths carry the date, so every hit's age is visible at a glance
 
 ## Install
@@ -92,8 +101,11 @@ commits).
   fusion, RRF k=60; embedding model defaults to `bge-m3`
 - `src/store.js`: pure-function vocabulary — path/slug/date derivation,
   provenance-comment parsing and merging (`mergeProvenance`, exactly
-  idempotent), `walkMemory` (the plugin never writes to disk directly; file
-  work goes through the dispatched native read/write tools)
+  idempotent), `walkMemory(windowDays)` (the hard window applies ONLY to
+  subdirectories whose name parses as a date — aged diaries leave the index
+  but stay on disk; non-date dirs like `memory/` are always indexed. The
+  plugin never writes to disk directly; file work goes through the dispatched
+  native read/write tools)
 - `client/bundle.js`: hand-written client bundle registering into the
   `settings.plugin.item` keyed slot (`key: 'dsh-memory'`); reads and writes go
   through the official client settings scope (`ctx.settingsScope.bind`) —
@@ -138,6 +150,7 @@ the settings card):
 ```yaml
 dsh-memory:
   searchLimit: 5            # number of results returned by memory_search (1-10); a hard cap the agent cannot override
+  dailyWindowDays: 90       # diary hard window in days: aged diaries stop participating in search (0 = unlimited); memory/ is exempt
   embeddingBaseUrl: ''      # Ollama-compatible /api/embed base URL (e.g. http://localhost:11434); empty disables vector search
   embeddingModel: 'bge-m3'  # embedding model name
   autoMemory: true          # per-turn reminder ("worth keeping -> must use the memory tool"); false = record only when asked

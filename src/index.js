@@ -1,7 +1,8 @@
 // dsh-memory plugin for DeepSeek Harness (dsh)
 //
 // Cross-session memory: daily per-workspace notes under
-// $DSH_HOME/dsh-memory/YYYY-MM-DD/, and memory search.
+// $DSH_HOME/dsh-memory/YYYY-MM-DD/, the long-term memory/memory.md, and
+// memory search.
 //
 // Design (agreed with the user, 2026-08-16/17/18/22/25):
 //   - memory = reusable experience reference (decisions, pitfalls, ideas),
@@ -78,6 +79,11 @@ export const inject = ['tools']
 export const Config = z.object({
   /** Default result count for memory_search. */
   searchLimit: z.natural().min(1).max(10).default(5),
+  /** Hard window in days for the DAILY notes (user decision 2026-08-24):
+   * dated notes older than this leave the searchable corpus (files stay on
+   * disk). 0 disables the window. The long-term memory/memory.md is never
+   * windowed and never decays. */
+  dailyWindowDays: z.natural().default(90),
   /** Ollama base URL for optional vector search (e.g. http://localhost:11434); empty disables it. */
   embeddingBaseUrl: z.string(),
   /** Embedding model served by embeddingBaseUrl. */
@@ -89,6 +95,15 @@ export const Config = z.object({
 
 const MAX_LIMIT = 10
 
+/** Long-term memory file (single, topic-heading organized — user decision
+ * 2026-08-24). Lives under its own non-date subdirectory: never windowed,
+ * never decayed. Created by the AGENT on first promotion (native write) —
+ * the `memory` tool stays a single-path daily locator by design. */
+const LONGTERM_REL = 'memory/memory.md'
+const LONGTERM_DIR_PREFIX = 'memory/'
+/** A diary hit older than this many days triggers the promotion hint. */
+const PROMOTION_HINT_MIN_AGE_DAYS = 7
+
 function memorySearchTool(ctx, getConfig, getVectorIndex) {
   return {
     name: 'memory_search',
@@ -97,6 +112,8 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
       'Give keywords in TWO groups with different score bonuses: `primary` (max 2 keywords — the essential terms, high bonus) and `secondary` (max 3 — refining/context terms, low bonus); ' +
       'every keyword that literally appears in a block adds its bonus (partial credit, no hard AND gate), so pick rare tokens actually written in the notes (file names, commands, proper nouns) rather than synonyms; ' +
       'extras beyond the caps are dropped with a note. Chinese or English both work; formatting marks like backticks/quotes are tolerated. ' +
+      'The library has TWO layers: recent daily notes (only the last N days participate — dailyWindowDays) and the long-term file memory/memory.md organized by topic headings (never decays, always searchable). ' +
+      'When results contain memory/memory.md blocks they are authoritative over conflicting older diary notes — fix outdated statements there in place; when a diary hit carries lasting value (user preferences, environment facts, standing conventions, recurring pitfalls), promote it into memory/memory.md. ' +
       'Returns BLOCK-level hits: rel carries the multi-level breadcrumb (file#主题 > 小节 > 子节, any heading level starts its own block), and each snippet is the WHOLE block text (up to ~1000 chars) — ' +
       'usually enough to continue without opening the file; read the source only when the block is truncated or more context is needed. ' +
       'The rel embeds the note date (YYYY-MM-DD/...): when several hits bear on the same topic, prefer the NEWER note (it reflects the latest state); ' +
@@ -117,7 +134,8 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
       // Result count is locked to the configured searchLimit (user decision
       // 2026-08-22): no agent-facing override.
       const limit = Math.min(Math.max(Number(getConfig().searchLimit) || 5, 1), MAX_LIMIT)
-      const entries = walkMemory()
+      const windowDays = Math.max(0, Math.floor(Number(getConfig().dailyWindowDays) || 0))
+      const entries = walkMemory(windowDays)
       // gather extra candidates from each signal so the fusion has room to rank
       const sub = searchMemory(entries, kw.primary, kw.secondary, Math.min(limit * 3, MAX_LIMIT * 3))
       let hits = sub.slice(0, limit)
@@ -134,7 +152,31 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
       }
       // tell the calling model when its input was trimmed, so the next call
       // respects the caps (primary ≤ 2, secondary ≤ 3)
-      return kw.notices.length > 0 ? `${kw.notices.join('; ')}\n${formatHits(hits)}` : formatHits(hits)
+      let out = formatHits(hits)
+      if (kw.notices.length > 0) out = `${kw.notices.join('; ')}\n${out}`
+      // Long-term layer etiquette (user decision 2026-08-24): promotion and
+      // in-place correction are considered AT RETRIEVAL TIME — the moment a
+      // note is reused is the only moment worth acting on. The hints are
+      // computed from the RESULT COMPOSITION (no hit counters, no state):
+      //   - long-term blocks participated → they win conflicts; fix stale
+      //     statements there;
+      //   - diary-only results with aged hits → suggest promoting lasting
+      //     facts into memory/memory.md (fresh same-day diaries stay quiet).
+      if (hits.length > 0) {
+        const hasLongterm = hits.some((h) => String(h.rel ?? '').startsWith(LONGTERM_DIR_PREFIX))
+        if (hasLongterm) {
+          out += `\n提示：以上含长期记忆（${LONGTERM_REL}）——与旧日记冲突时以它为准；发现其内容过时，就地更新对应主题块（先读后改）。`
+        } else {
+          const agedMs = Date.now() - PROMOTION_HINT_MIN_AGE_DAYS * 86400000
+          const hasAged = hits.some((h) => { const ms = Date.parse(String(h.date ?? '')); return Number.isFinite(ms) && ms < agedMs })
+          if (hasAged) {
+            out += `\n提示：若以上有应长期生效的事实（用户偏好、环境事实、长期约定、反复踩的坑），可固化到 ${LONGTERM_REL} 的对应主题块（先读后改；日记原件不必改动，到期自然不再参与检索）。`
+          }
+        }
+      } else if (windowDays > 0) {
+        out += `\n（当前仅检索最近 ${windowDays} 天的日记与全部长期记忆 ${LONGTERM_REL}）`
+      }
+      return out
     },
   }
 }
@@ -222,6 +264,7 @@ export function apply(ctx) {
   // with "settings namespace ... is not registered".
   const DEFAULTS = {
     searchLimit: 5,
+    dailyWindowDays: 90,
     embeddingBaseUrl: '',
     embeddingModel: 'bge-m3',
     autoMemory: true,
@@ -231,6 +274,7 @@ export function apply(ctx) {
     /** Mirror one resolved source onto the live runtime object. */
     const applySource = (source) => {
       runtime.searchLimit = source.searchLimit
+      runtime.dailyWindowDays = Math.max(0, Math.floor(Number(source.dailyWindowDays) || 0))
       runtime.embeddingBaseUrl = source.embeddingBaseUrl ?? ''
       runtime.embeddingModel = source.embeddingModel || 'bge-m3'
       runtime.autoMemory = source.autoMemory !== false

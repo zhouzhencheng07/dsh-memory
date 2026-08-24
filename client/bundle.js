@@ -40,6 +40,8 @@ window.__ModuleLoader__.load({
       description: "Cross-session memory: daily per-workspace notes and memory_search.",
       searchLimit: "Search result limit",
       searchLimitHint: "Result count for memory_search (1-10); the agent cannot override it.",
+      dailyWindowDays: "Diary search window (days)",
+      dailyWindowDaysHint: "Daily notes older than this stop participating in search (0 = unlimited); files stay on disk. The long-term memory/memory.md is never windowed.",
       embeddingBaseUrl: "Embedding base URL",
       embeddingBaseUrlHint: "Ollama base URL (e.g. http://localhost:11434) for vector search; blank disables it.",
       embeddingModel: "Embedding model",
@@ -64,6 +66,8 @@ window.__ModuleLoader__.load({
       description: "跨会话记忆：每日工作区笔记与 memory_search 检索。",
       searchLimit: "搜索返回条数",
       searchLimitHint: "memory_search 返回条数（1-10），agent 不可覆盖。",
+      dailyWindowDays: "日记检索窗口（天）",
+      dailyWindowDaysHint: "超过该天数的每日笔记不再参与检索（0=不限），文件保留在磁盘；长期记忆 memory/memory.md 不受窗口限制。",
       embeddingBaseUrl: "向量嵌入服务地址",
       embeddingBaseUrlHint: "Ollama 基地址（如 http://localhost:11434），用于向量检索；留空禁用。",
       embeddingModel: "嵌入模型",
@@ -116,6 +120,18 @@ window.__ModuleLoader__.load({
           return trimmed === "" ? { kind: "clear" } : { kind: "set", value: trimmed };
         }
       },
+      dailyWindowDays: {
+        kind: "number",
+        label: "dailyWindowDays",
+        hint: "dailyWindowDaysHint",
+        format: (value) => (typeof value === "number" ? String(value) : ""),
+        parse: (text) => {
+          const trimmed = text.trim();
+          if (trimmed === "") return { kind: "clear" };
+          const parsed = Number(trimmed);
+          return Number.isFinite(parsed) && parsed >= 0 ? { kind: "set", value: Math.floor(parsed) } : undefined;
+        }
+      },
       embeddingModel: {
         kind: "text",
         label: "embeddingModel",
@@ -139,7 +155,7 @@ window.__ModuleLoader__.load({
       // the neutral memory tool stays usable. No end-of-turn hook, no
       // tools/result provenance hook (the memory tool maintains provenance). ──
     };
-    const FIELDS = ["searchLimit", "embeddingBaseUrl", "embeddingModel", "autoMemory"];
+    const FIELDS = ["searchLimit", "dailyWindowDays", "embeddingBaseUrl", "embeddingModel", "autoMemory"];
 
     // ── theme-aligned styles (dsw alias tokens, as the official cards use) ──
     // (dropped during the migration rewrite once — the card then crashed every

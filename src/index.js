@@ -110,7 +110,8 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
     description:
       'Search the cross-session memory library: recent daily notes plus the long-term memory/memory.md. ' +
       'Keywords go in two groups: `primary` (up to 2) and `secondary` (up to 3), whitespace-separated and matched literally with partial credit per keyword hit — pick tokens actually written in the notes rather than synonyms. ' +
-      'Returns block-level hits whose snippet is the whole block (up to ~1000 chars); when no long-term block makes the list, the last slot is reserved for one.',
+      'Returns block-level hits whose snippet is the whole block; when no long-term block makes the list, the last slot is reserved for one. ' +
+      'Supplements to memory/memory.md stay concise: split long content under deeper headings.',
     parameters: {
       primary: { type: 'string', required: true, description: 'Up to 2 space-separated keywords — terms a relevant note likely contains verbatim' },
       secondary: { type: 'string', description: 'Up to 3 optional space-separated keywords — refining/context terms' },
@@ -228,7 +229,7 @@ function memoryLocatorTool(ctx) {
     name: 'memory',
     description:
       "Returns today's cross-session memory note path for this workspace, creating it with a session-source comment when missing. " +
-      'Maintain the note with the native read/write/edit tools (read before modify): record only experience worth reusing across sessions — decisions and reasons, preferences, pitfalls and fixes, reusable commands — organized under # headings, merging related topics and correcting outdated statements in place.',
+      'Maintain the note with the native read/write/edit tools (read before modify): record only experience worth reusing across sessions — decisions and reasons, preferences, pitfalls and fixes, reusable commands; organize under # headings, keep each block concise and split long content under deeper headings, merge related topics, and correct outdated statements in place.',
     parameters: {},
     output: {
       schema: { type: 'string' },
@@ -330,7 +331,7 @@ export function apply(ctx) {
           const session = context.agent?.session
           if (!session?.id) return ''
           if ((session.header?.delegationDepth ?? 0) > 0) return ''
-          return 'When this turn produced something worth keeping across sessions, you MUST use the memory tool.'
+          return 'When this turn produced something worth keeping across sessions, you MUST use the `memory` tool.'
         },
       })
     })

@@ -108,21 +108,12 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
   return {
     name: 'memory_search',
     description:
-      'Search the memory library: daily notes (memory/) only. ' +
-      'Give keywords in TWO groups with different score bonuses: `primary` (max 2 keywords — the essential terms, high bonus) and `secondary` (max 3 — refining/context terms, low bonus); ' +
-      'every keyword that literally appears in a block adds its bonus (partial credit, no hard AND gate), so pick rare tokens actually written in the notes (file names, commands, proper nouns) rather than synonyms; ' +
-      'extras beyond the caps are dropped with a note. Chinese or English both work; formatting marks like backticks/quotes are tolerated. ' +
-      'The library has TWO layers: recent daily notes (only the last N days participate — dailyWindowDays) and the long-term file memory/memory.md organized by topic headings (never decays, always searchable). ' +
-      'When results contain memory/memory.md blocks they are authoritative over conflicting older diary notes — fix outdated statements there and supplement missing lasting facts in place; when NO long-term block makes the list, the last result slot is reserved for the best-ranking one (with limit ≥ 2). Older diaries get no maintenance — they decay and age out on their own. ' +
-      'Returns BLOCK-level hits: rel carries the multi-level breadcrumb (file#主题 > 小节 > 子节, any heading level starts its own block), and each snippet is the WHOLE block text (up to ~1000 chars) — ' +
-      'usually enough to continue without opening the file; read the source only when the block is truncated or more context is needed. ' +
-      'The rel embeds the note date (YYYY-MM-DD/...): when several hits bear on the same topic, prefer the NEWER note (it reflects the latest state); ' +
-      'an older note may still hold details the new one dropped — merge them rather than trusting either alone. ' +
-      'Ranking already discounts older notes (recency decay), so older but still relevant blocks remain reachable. ' +
-      'When embeddingBaseUrl is configured, vector search is fused with keyword hits automatically (unified RRF score).',
+      'Search the cross-session memory library: recent daily notes plus the long-term memory/memory.md. ' +
+      'Keywords go in two groups: `primary` (up to 2) and `secondary` (up to 3), whitespace-separated and matched literally with partial credit per keyword hit — pick tokens actually written in the notes rather than synonyms. ' +
+      'Returns block-level hits whose snippet is the whole block (up to ~1000 chars); when no long-term block makes the list, the last slot is reserved for one.',
     parameters: {
-      primary: { type: 'string', required: true, description: 'Group-1 keywords, max 2, whitespace-separated — essential terms that a relevant note most likely contains verbatim' },
-      secondary: { type: 'string', description: 'Group-2 keywords, max 3, whitespace-separated — refining/context terms that add a small bonus each; omit when unnecessary' },
+      primary: { type: 'string', required: true, description: 'Up to 2 space-separated keywords — terms a relevant note likely contains verbatim' },
+      secondary: { type: 'string', description: 'Up to 3 optional space-separated keywords — refining/context terms' },
     },
     output: {
       schema: { type: 'string' },
@@ -236,9 +227,8 @@ function memoryLocatorTool(ctx) {
   return {
     name: 'memory',
     description:
-      "Returns today's cross-session memory note path for this workspace (one markdown file per workspace per day; created automatically and tagged with the session source when missing — the leading <!-- 会话来源: ... --> comment is maintained for you). " +
-      'Maintain the note with the NATIVE read/write/edit tools: read first, then edit local changes or write to create/replace the whole file. ' +
-      'Content rules: only record experience worth reusing across sessions — decisions and their reasons, user preferences/corrections/conventions, pitfalls and how they were fixed, reusable commands or processes, state changes; organize topics with # headings, merge related topics instead of duplicating, correct outdated statements in THIS note in place — today\'s note is the one place for same-day corrections (older diaries simply age out; lasting facts belong in memory/memory.md via search-time prompts), no play-by-play.',
+      "Returns today's cross-session memory note path for this workspace, creating it with a session-source comment when missing. " +
+      'Maintain the note with the native read/write/edit tools (read before modify): record only experience worth reusing across sessions — decisions and reasons, preferences, pitfalls and fixes, reusable commands — organized under # headings, merging related topics and correcting outdated statements in place.',
     parameters: {},
     output: {
       schema: { type: 'string' },

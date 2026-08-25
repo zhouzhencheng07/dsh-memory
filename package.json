@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Cross-session memory for DeepSeek Harness (dsh): background Auto-Memory, per-workspace daily notes, memory search, and optional vector search",
   "license": "MIT",
   "type": "module",

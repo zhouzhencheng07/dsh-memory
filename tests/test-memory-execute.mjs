@@ -1,8 +1,9 @@
 // End-to-end checks for memory_search's execute() across the two-layer
-// corpus (2026-08-24): two-group parameters + trim notices + the hard daily
-// window + retrieval-time long-term hints + the guaranteed long-term slot.
-// Boots src/index.js against the @deepseek-ai/* stubs, points $MEM_TEST_HOME
-// at a temp sandbox seeded with layered notes, and drives the tool directly.
+// corpus (2026-08-25 revision): single `keywords` parameter + trim notices +
+// the hard daily window + MIN_SCORE filtering + ONE unconditional success
+// hint + the CONFIGURABLE ADDITIVE long-term append seat. Boots src/index.js
+// against the @deepseek-ai/* stubs, points $MEM_TEST_HOME at a temp sandbox
+// seeded with layered notes, and drives the tool directly.
 // Usage: node --import ./tests/register-mem-test.mjs tests/test-memory-execute.mjs
 import { strict as assert } from 'node:assert'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
@@ -44,37 +45,47 @@ function boot(settings) {
   return search
 }
 
+/** Count result rows in formatted output (each row starts with `- [`). */
+const rowCount = (out) => out.split('- [' ).length - 1
+
 // --- default boot: searchLimit 5 ----------------------------------------------
 const search = boot({ searchLimit: 5 })
-assert.deepEqual(Object.keys(search.parameters).sort(), ['primary', 'secondary'])
-assert.equal(search.parameters.primary.required, true)
-assert.ok(!('required' in search.parameters.secondary), 'optional param must omit `required`')
+assert.deepEqual(Object.keys(search.parameters).sort(), ['keywords'], 'single keywords parameter')
+assert.equal(search.parameters.keywords.required, true)
 
-// --- two-group basics ---------------------------------------------------------
-const out1 = await search.execute({ primary: 'alphaunique', secondary: '' })
+// --- single-keyword basics ------------------------------------------------------
+const rootPrefix = process.env.MEM_TEST_HOME.replaceAll('\\', '/') + '/dsh-memory/'
+const out1 = await search.execute({ keywords: 'alphaunique' })
 assert.match(out1, /今日流水/)
-assert.ok(!out1.includes('Note:'), `fresh same-day diary must stay quiet, got:\n${out1}`)
+assert.ok(out1.includes(`${rootPrefix}${dayStamp(0)}/note.md#`), `hits must carry ABSOLUTE file paths, got:\n${out1}`)
+assert.match(out1, /Note: add factual information referenced above/, 'ANY non-empty result carries the long-term hint')
+assert.ok(out1.includes(`${rootPrefix}memory/memory.md (read before edit)`), 'the hint names the ABSOLUTE long-term path')
 
-const out2 = await search.execute({ primary: 'alphaunique extra1 extra2', secondary: '' })
-assert.match(out2, /^primary capped to 2 keywords \(dropped: extra2\)/)
+const outCap = await search.execute({ keywords: 'alphaunique extra1 extra2 extra3 extra4 extra5 extra6 extra7 extra8' })
+assert.match(outCap, /^keywords capped to 7 \(dropped: extra7, extra8\)/)
 
-await assert.rejects(() => search.execute({ primary: '   ', secondary: '' }), /no usable keywords/)
+await assert.rejects(() => search.execute({ keywords: '   ' }), /no usable keywords/)
 
 // --- hard daily window (default 90) -------------------------------------------
-const outOld = await search.execute({ primary: 'gammaunique', secondary: '' })
+const outOld = await search.execute({ keywords: 'gammaunique' })
 assert.match(outOld, /^No memory found\.$/, '200-day-old diary is outside the 90-day window')
-assert.ok(!outOld.includes('最近'), 'no redundant window notice on empty results')
+assert.ok(!outOld.includes('Note:'), 'empty results carry no hint')
 
-const outMid = await search.execute({ primary: 'betaunique', secondary: '' })
+const outMid = await search.execute({ keywords: 'betaunique' })
 assert.match(outMid, /十天前/, '10-day-old diary stays inside the window')
-assert.match(outMid, /add them to the matching topic block in memory\/memory\.md/, 'aged diary hit triggers the supplement hint')
-assert.match(outMid, /old diaries get no maintenance/, 'old diaries are explicitly maintenance-free')
+assert.match(outMid, /fix outdated statements there/, 'the success hint covers correcting stale long-term blocks')
 
-const outLong = await search.execute({ primary: 'deltaunique', secondary: '' })
+// --- long-term participation: first place is already long-term ------------------
+const outLong = await search.execute({ keywords: 'deltaunique' })
 assert.match(outLong, /memory\/memory\.md/)
-assert.match(outLong, /results include long-term memory/, 'long-term participation triggers the correction-etiquette hint')
-assert.match(outLong, /supplement missing lasting facts/, 'correction hint covers supplementing missing facts too')
-assert.ok(!outLong.includes('add them to the matching topic block'), 'supplement hint suppressed when the long-term layer already answered')
+assert.equal(rowCount(outLong), 1, 'long-term first place must NOT gain a duplicate append seat')
+
+// --- MIN_SCORE floor: weak partial matches never surface ------------------------
+seed([dayStamp(60)], 'low.md', '# 陈旧旁证\n\nzombietoken 出现在六十天前的日记里。\n')
+seed([dayStamp(0)], 'anchor.md', '# 今日锚\n\nfreshanchor 在今天的日记里。\n')
+const outWeak = await search.execute({ keywords: 'freshanchor p1 p2 zombietoken' })
+assert.match(outWeak, /今日锚/, 'the strong primary hit still surfaces')
+assert.ok(!outWeak.includes('陈旧旁证'), 'aged secondary-only noise is dropped by MIN_SCORE')
 
 // --- store-level window semantics ----------------------------------------------
 const { walkMemory } = await import('../src/store.js')
@@ -86,25 +97,36 @@ assert.ok(w90.some((r) => r.includes(dayStamp(10))), 'in-window diary indexed')
 assert.ok(!w90.some((r) => r.includes(dayStamp(200))), 'out-of-window diary excluded')
 assert.equal(walkMemory('nonsense').length, walkMemory(0).length, 'non-numeric window behaves as disabled')
 
-// --- guaranteed long-term slot ---------------------------------------------------
-// Query matching two fresh-ish diaries AND a deliberately heavyweight
-// long-term block: with limit 2 both slots would be diaries, so the LAST slot
-// must yield to the best-ranking memory/ block.
-seed([dayStamp(0)], 'r-a.md', '# 近水楼台\n\nreservetoken 出现在今天的日记 A。\n')
-seed([dayStamp(1)], 'r-b.md', '# 昨日流水\n\nreservetoken 出现在昨天的日记 B。\n')
-seed(['memory'], 'memory-heavy-tmp.md', `# 保底测试\n\nreservetoken 出现在长期记忆里。${'填充'.repeat(1500)}\n`)
+// --- additive long-term append seat ----------------------------------------------
+// Two fresh diaries with DOUBLE reservetoken occurrences legitimately outrank
+// a normal-sized long-term block with one occurrence: with limit 2 both slots
+// are diaries, so the best-ranking long-term block must be APPENDED as a
+// third row (never evicting 昨日流水).
+seed([dayStamp(0)], 'r-a.md', '# 近水楼台\n\nreservetoken 出现在今天的日记。reservetoken 再现一次。\n')
+seed([dayStamp(1)], 'r-b.md', '# 昨日流水\n\nreservetoken 出现在昨天的日记。reservetoken 再现一次。\n')
+seed(['memory'], 'memory-append.md', '# 追加测试\n\nreservetoken 出现在长期记忆里，永不衰减。\n')
 const search2 = boot({ searchLimit: 2 })
-const outSwap = await search2.execute({ primary: 'reservetoken', secondary: '' })
-assert.match(outSwap, /近水楼台/, 'best diary keeps slot 1')
-assert.match(outSwap, /memory\/memory\.md/, 'heavyweight long-term block takes the reserved last slot')
-assert.ok(!outSwap.includes('昨日流水'), 'the outranked diary was evicted from slot 2')
-assert.match(outSwap, /results include long-term memory/, 'reserved hit still triggers the etiquette hint')
+const outAppend = await search2.execute({ keywords: 'reservetoken' })
+assert.match(outAppend, /近水楼台/, 'best diary keeps slot 1')
+assert.match(outAppend, /昨日流水/, 'second diary KEEPS slot 2 (additive, not evicting)')
+assert.match(outAppend, /追加测试/, 'best-ranking long-term block appended after the regular results')
+assert.equal(rowCount(outAppend), 3)
+assert.match(outAppend, /Note: add factual information referenced above/, 'appended hit still ends with the hint')
 
-// limit 1: never evict a sole result
+// off switch: pure top-N
+const searchOff = boot({ searchLimit: 2, longtermAppend: false })
+const outOff = await searchOff.execute({ keywords: 'reservetoken' })
+assert.match(outOff, /近水楼台/)
+assert.match(outOff, /昨日流水/)
+assert.ok(!outOff.includes('追加测试'), 'longtermAppend:false disables the seat entirely')
+assert.equal(rowCount(outOff), 2)
+
+// limit 1: the seat now works additively where the old eviction could not
 const search3 = boot({ searchLimit: 1 })
-const outSolo = await search3.execute({ primary: 'reservetoken', secondary: '' })
+const outSolo = await search3.execute({ keywords: 'reservetoken' })
 assert.match(outSolo, /近水楼台/, 'limit 1 keeps the top diary')
-assert.ok(!outSolo.includes('memory-heavy-tmp'), 'no eviction when the window has a single slot')
+assert.match(outSolo, /追加测试/, 'limit 1 gains the appended long-term block')
+assert.equal(rowCount(outSolo), 2)
 
-console.log('execute-layer checks passed (params, notices, window, hints, store filtering, long-term reservation)')
+console.log('execute-layer checks passed (params, notices, window, MIN_SCORE, unconditional hint, store filtering, additive long-term seat)')
 rmSync(home, { recursive: true, force: true })

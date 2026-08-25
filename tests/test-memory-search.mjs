@@ -1,8 +1,8 @@
-// Two-group keyword scoring verification for memory_search (2026-08-24):
-//   `primary` (max 2 keywords) scores PRIMARY_WEIGHT per hit, `secondary`
-//   (max 3) scores SECONDARY_WEIGHT — partial credit per matched keyword,
-//   no hard AND gate. Replaces the 2026-08-22 tier scheme whose tier-3
-//   zero-partial-credit was the measured root cause of misses.
+// Positional keyword scoring verification for memory_search (2026-08-25):
+//   ONE `keywords` string parsed by parseKeywords() — the FIRST 3 terms score
+//   PRIMARY_WEIGHT per hit, the next 4 SECONDARY_WEIGHT — partial credit per
+//   matched keyword, no hard AND gate; blocks scoring below MIN_SCORE never
+//   return. Replaces the 2026-08-24 explicit two-parameter groups.
 // search.js is dependency-free, so no stub loader is needed.
 // Usage: node tests/test-memory-search.mjs
 import { strict as assert } from 'node:assert'
@@ -10,12 +10,13 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   searchMemory,
-  parseKeywordGroups,
+  parseKeywords,
   looseNormalize,
   MAX_PRIMARY_KEYWORDS,
   MAX_SECONDARY_KEYWORDS,
   PRIMARY_WEIGHT,
   SECONDARY_WEIGHT,
+  MIN_SCORE,
 } from '../src/search.js'
 
 let passed = 0
@@ -27,6 +28,14 @@ function check(label, fn) {
 
 const DAY = '2026-08-24'
 const entry = (rel, text, day = DAY) => ({ rel: `${day}/${rel}`, date: day, kind: 'note', text })
+/** Long-term layer: unparseable date → recencyWeight 1 (no decay), deterministic. */
+const ltEntry = (text) => ({ rel: 'memory/memory.md', date: '', kind: 'note', text })
+const daysAgo = (n) => {
+  const d = new Date(Date.now() - n * 86400000)
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${d.getFullYear()}-${m}-${day}`
+}
 
 // --- looseNormalize --------------------------------------------------------
 check('looseNormalize strips markdown decoration, keeps identifiers', () => {
@@ -35,22 +44,22 @@ check('looseNormalize strips markdown decoration, keeps identifiers', () => {
   assert.equal(looseNormalize('A\t\nB   C'), 'a b c')
 })
 
-// --- parseKeywordGroups ----------------------------------------------------
-check('parseKeywordGroups caps primary to 2 / secondary to 3 and reports drops', () => {
-  const kw = parseKeywordGroups('a b c d', 'e f g h')
-  assert.equal(MAX_PRIMARY_KEYWORDS, 2)
-  assert.equal(MAX_SECONDARY_KEYWORDS, 3)
-  assert.deepEqual(kw.primary, ['a', 'b'])
-  assert.deepEqual(kw.secondary, ['e', 'f', 'g'])
-  assert.equal(kw.notices.length, 2)
-  assert.match(kw.notices[0], /primary capped to 2.*dropped: c, d/)
-  assert.match(kw.notices[1], /secondary capped to 3.*dropped: h/)
+// --- parseKeywords ----------------------------------------------------------
+check('parseKeywords caps positionally at 3+4 and reports drops', () => {
+  assert.equal(MAX_PRIMARY_KEYWORDS, 3)
+  assert.equal(MAX_SECONDARY_KEYWORDS, 4)
+  const kw = parseKeywords('a b c d e f g h i')
+  assert.deepEqual(kw.primary, ['a', 'b', 'c'])
+  assert.deepEqual(kw.secondary, ['d', 'e', 'f', 'g'])
+  assert.equal(kw.notices.length, 1)
+  assert.match(kw.notices[0], /keywords capped to 7.*dropped: h, i/)
 })
 
-check('parseKeywordGroups dedupes across groups at the highest weight', () => {
-  const kw = parseKeywordGroups('Limit limit', 'limit settings')
-  assert.deepEqual(kw.primary, ['limit'])
-  assert.deepEqual(kw.secondary, ['settings'])
+check('parseKeywords dedupes at the first occurrence', () => {
+  const kw = parseKeywords('limit limit settings')
+  assert.deepEqual(kw.primary, ['limit', 'settings'])
+  assert.deepEqual(kw.secondary, [])
+  assert.deepEqual(kw.notices, [])
 })
 
 // --- partial credit: the fix for the measured AND-gate miss ----------------
@@ -61,7 +70,7 @@ const corpus = [
   entry('a.md', '# 环境\n\n检查 HKCU\\Environment 的冗余覆盖变量，CUDA_HOME 指向旧路径；备份注册表后再改名。'),
 ]
 
-check('partial credit: block missing the primary words still surfaces via secondaries', () => {
+check('partial credit: block missing the essential words still surfaces via context terms', () => {
   const hits = searchMemory(corpus, ['nvidia', '环境变量'], ['注册表', '备份', 'hkcu'], 10)
   assert.equal(hits.length, 1, 'the block must NOT vanish when primaries are absent')
   assert.match(hits[0].rel, /a\.md/)
@@ -72,9 +81,11 @@ check('no match at all stays empty; empty keyword lists match nothing', () => {
   assert.deepEqual(searchMemory(corpus, [], [], 5), [])
 })
 
-// --- group weights ----------------------------------------------------------
+// --- positional weights ------------------------------------------------------
 check('primary hit weighs PRIMARY_WEIGHT× an identical secondary hit', () => {
-  const one = [entry('t.md', '# 同文\n\nalpha beta')]
+  // long-term entry (no decay): a lone secondary hit lands exactly on the
+  // MIN_SCORE floor and survives, so both sides of the ratio are observable
+  const one = [ltEntry('# 同文\n\nalpha beta')]
   const asPrimary = searchMemory(one, ['alpha'], [], 5)[0].score
   const asSecondary = searchMemory(one, [], ['alpha'], 5)[0].score
   assert.ok(Math.abs(asPrimary / asSecondary - PRIMARY_WEIGHT / SECONDARY_WEIGHT) < 1e-9,
@@ -107,14 +118,35 @@ check('repeated occurrences add more score (length-damped)', () => {
   assert.ok(hitsOnce > hitsSparse, `${hitsOnce} should beat ${hitsSparse}`)
 })
 
-// --- real-corpus acceptance: the exact query that missed on 2026-08-22 ------
-check('REAL corpus: two-group query still surfaces the appendd fix-record block', () => {
+// --- MIN_SCORE floor (2026-08-25) -------------------------------------------
+check(`MIN_SCORE keeps an exactly-at-floor long-term secondary-only hit (${MIN_SCORE})`, () => {
+  // no decay on the undated long-term layer: 1 hit ÷ 2 (length damping on a
+  // single-block corpus) = 0.5 exactly → `>= floor` keeps it
+  const hits = searchMemory([ltEntry('# 用户环境\n\n阈值')], [], ['阈值'], 5)
+  assert.equal(hits.length, 1)
+})
+
+check('MIN_SCORE drops a dated-diary secondary-only hit (decay puts it under the floor)', () => {
+  // 30 days old → decay 0.5 → 1 ÷ 2 × 0.5 = 0.25 < 0.5
+  assert.deepEqual(searchMemory([entry('s.md', '# 旁\n\n阈值', daysAgo(30))], [], ['阈值'], 5), [])
+})
+
+check('MIN_SCORE keeps a primary hit even at the recency floor', () => {
+  // 365 days old → decay floored at 0.4 → 3 ÷ 2 × 0.4 = 0.6 ≥ 0.5
+  const hits = searchMemory([entry('a.md', '# 远\n\n阈值', daysAgo(365))], ['阈值'], [], 5)
+  assert.equal(hits.length, 1)
+})
+
+// --- real-corpus acceptance: the exact query that missed on 2026-08-22 -------
+check('REAL corpus: positional-keyword query still surfaces the appendd fix-record block', () => {
   const dir = join('D:', '\\agent\\.dsh\\dsh-memory', '2026-08-22')
   const entries = readdirSync(dir).filter((f) => f.endsWith('.md')).map((f) =>
     entry(f, readFileSync(join(dir, f), 'utf8'), '2026-08-22'),
   )
-  const kw = parseKeywordGroups('dsh-memory 0.2.2', 'appendd')
+  const kw = parseKeywords('dsh-memory 0.2.2 appendd')
   assert.deepEqual(kw.notices, [])
+  assert.deepEqual(kw.primary, ['dsh-memory', '0.2.2', 'appendd'])
+  assert.deepEqual(kw.secondary, [])
   const hits = searchMemory(entries, kw.primary, kw.secondary, 10)
   const target = hits.find((h) => h.rel.includes('待修 bug'))
   assert.ok(target, `expected the 待修 bug block in top hits, got:\n${hits.map((h) => h.rel).join('\n')}`)

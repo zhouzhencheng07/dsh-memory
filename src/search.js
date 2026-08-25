@@ -23,10 +23,13 @@
 // much stronger. The digest/dream layer is gone; recency guidance + decay
 // replace its convergence job.
 //
-// TWO-GROUP KEYWORD SCORING (user decision 2026-08-24): the caller gives
-// keywords in TWO groups with different score weights — `primary` (max 2,
-// the essential terms, ×PRIMARY_WEIGHT each) and `secondary` (max 3,
-// refining/context terms, ×SECONDARY_WEIGHT each). Every keyword that
+// POSITIONAL KEYWORD SCORING (2026-08-25 revision of the 2026-08-24
+// two-group design): the caller gives ONE `keywords` string — up to 7
+// space-separated terms; the FIRST 3 are the essential terms (×PRIMARY_WEIGHT
+// each), the next 4 the refining/context terms (×SECONDARY_WEIGHT each) —
+// mirroring how mainstream search tools take a single natural query field
+// (Grep `pattern`, mem0 `query`) instead of asking the caller to pre-classify
+// keywords into two parameters. Every keyword that
 // literally appears in a block (formatting-tolerant via looseNormalize)
 // contributes its weighted occurrence count — PARTIAL credit, no hard AND
 // gate. This replaces the old tier-1/2/3 scheme (whole-phrase ×1.0 →
@@ -34,16 +37,24 @@
 // misses (2026-08-24 diagnosis) was tier 3's zero partial credit — a block
 // containing some but not all query words scored nothing and vanished from
 // the keyword list. Counts are damped by block length (BM25-style), then
-// multiplied by the note's recency decay weight.
+// multiplied by the note's recency decay weight. Blocks whose final score
+// falls below MIN_SCORE never return at all (2026-08-25).
 
-/** Cap on group-1 (`primary`) keywords: the essential terms. */
-export const MAX_PRIMARY_KEYWORDS = 2
-/** Cap on group-2 (`secondary`) keywords: refining/context terms. */
-export const MAX_SECONDARY_KEYWORDS = 3
+/** Cap on the LEADING essential keywords (positional group 1, high weight). */
+export const MAX_PRIMARY_KEYWORDS = 3
+/** Cap on the trailing context keywords (positional group 2, low weight). */
+export const MAX_SECONDARY_KEYWORDS = 4
 /** Per-keyword score bonus for a primary-group hit (high). */
 export const PRIMARY_WEIGHT = 3
 /** Per-keyword score bonus for a secondary-group hit (low). */
 export const SECONDARY_WEIGHT = 1
+/** Floor for a block's final score: below this it is not returned at all
+ * (2026-08-25 user decision: too-low hits are noise). Scale reference —
+ * a single primary hit on an average-length block lands ~1.5 fresh and
+ * ~0.6 at the recency floor; a single secondary-only hit ~0.5 fresh and
+ * ~0.2 aged. So 0.5 keeps every primary match plus any FRESH secondary-only
+ * match, dropping stale secondary-only noise. */
+export const MIN_SCORE = 0.5
 
 /** Max chars of a returned snippet window (oversized-block fallback). */
 export const SNIPPET_CHARS = 200
@@ -96,36 +107,36 @@ export function recencyWeight(date) {
 }
 
 /**
- * Parse the two keyword groups for memory_search: whitespace-split,
- * looseNormalize'd, deduped (a token counts once, at its highest group —
- * primary wins), and capped to MAX_PRIMARY_KEYWORDS / MAX_SECONDARY_KEYWORDS.
- * Keywords dropped by the caps are reported in `notices` so the tool output
- * can tell the calling model its input was trimmed.
- * @param {string} primaryInput - raw `primary` argument (max 2 keywords)
- * @param {string} secondaryInput - raw `secondary` argument (max 3 keywords)
+ * Parse the single `keywords` argument for memory_search (2026-08-25):
+ * whitespace-split, looseNormalize'd, deduped (a term counts once, at its
+ * FIRST occurrence), then split POSITIONALLY — the first
+ * MAX_PRIMARY_KEYWORDS become the high-weight essential terms, the next
+ * MAX_SECONDARY_KEYWORDS the low-weight context terms. Terms dropped by
+ * the caps are reported in `notices` so the tool output can tell the
+ * calling model its input was trimmed.
+ * @param {string} input - raw `keywords` argument (max 7 terms)
  * @returns {{primary: string[], secondary: string[], notices: string[]}}
  */
-export function parseKeywordGroups(primaryInput, secondaryInput) {
+export function parseKeywords(input) {
   const notices = []
-  const seen = new Set() // cross-group dedupe, first occurrence (primary) wins
-  const take = (input, cap, label) => {
-    const kept = []
-    const dropped = []
-    for (const raw of String(input ?? '').split(/\s+/).filter(Boolean)) {
-      const word = looseNormalize(raw)
-      if (!word || seen.has(word)) continue
-      if (kept.length >= cap) {
-        dropped.push(raw)
-        continue
-      }
-      seen.add(word)
-      kept.push(word)
+  const seen = new Set()
+  const primary = []
+  const secondary = []
+  const dropped = []
+  for (const raw of String(input ?? '').split(/\s+/).filter(Boolean)) {
+    const word = looseNormalize(raw)
+    if (!word || seen.has(word)) continue
+    if (primary.length < MAX_PRIMARY_KEYWORDS) primary.push(word)
+    else if (secondary.length < MAX_SECONDARY_KEYWORDS) secondary.push(word)
+    else {
+      dropped.push(raw)
+      continue
     }
-    if (dropped.length > 0) notices.push(`${label} capped to ${cap} keywords (dropped: ${dropped.join(', ')})`)
-    return kept
+    seen.add(word)
   }
-  const primary = take(primaryInput, MAX_PRIMARY_KEYWORDS, 'primary')
-  const secondary = take(secondaryInput, MAX_SECONDARY_KEYWORDS, 'secondary')
+  if (dropped.length > 0) {
+    notices.push(`keywords capped to ${MAX_PRIMARY_KEYWORDS + MAX_SECONDARY_KEYWORDS} (dropped: ${dropped.join(', ')})`)
+  }
   return { primary, secondary, notices }
 }
 
@@ -223,9 +234,10 @@ export function blockSnippet(text, query) {
 }
 
 /**
- * Search memory entries at BLOCK level with TWO-GROUP keyword scoring
- * (user decision 2026-08-24): every keyword that literally appears in a
- * block adds `PRIMARY_WEIGHT` / `SECONDARY_WEIGHT` (by group) times its
+ * Search memory entries at BLOCK level with POSITIONAL keyword scoring
+ * (2026-08-25 revision of the two-group scheme): every keyword that literally
+ * appears in a block adds `PRIMARY_WEIGHT` / `SECONDARY_WEIGHT` (by
+ * positional group, see parseKeywords) times its
  * occurrence count — partial credit, no hard AND gate, so a block matching
  * only some keywords still surfaces (ranked by how much it did match).
  * Matching is formatting-tolerant: both sides go through looseNormalize(),
@@ -236,8 +248,9 @@ export function blockSnippet(text, query) {
  * drop below the floor). Title-only blocks are skipped (mirroring the vector
  * index). Ties break by date (newer first), then path.
  *
- * Keywords are expected pre-parsed via parseKeywordGroups() (capped and
- * deduped); they are re-normalized defensively here.
+ * Keywords are expected pre-parsed via parseKeywords() (capped and
+ * deduped); they are re-normalized defensively here. Blocks scoring below
+ * MIN_SCORE are dropped entirely — weak partial matches never surface.
  * @param {Array<{rel: string, date: string, kind: string, text: string}>} entries
  * @param {string[]} primaryKeywords - group-1 keywords (essential, high bonus)
  * @param {string[]} secondaryKeywords - group-2 keywords (refining, low bonus)
@@ -276,6 +289,7 @@ export function searchMemory(entries, primaryKeywords = [], secondaryKeywords = 
     if (weighted === 0) continue
     const lenNorm = weighted / (1 + block.text.length / avgLen)
     const score = lenNorm * recencyWeight(entry.date)
+    if (score < MIN_SCORE) continue // too-low partial matches are noise
     hits.push({
       rel: block.title ? `${entry.rel}#${block.title}` : entry.rel,
       date: entry.date,
@@ -300,16 +314,36 @@ function formatScore(score) {
 }
 
 /**
+ * Absolute display path for a hit: `rootDir` joined with the rel's FILE part,
+ * keeping the `#breadcrumb` suffix verbatim. Forward slashes throughout so
+ * the path is stable in output regardless of platform separators.
+ */
+function displayPath(rel, rootDir) {
+  const base = String(rootDir ?? '').trim().replaceAll('\\', '/').replace(/\/+$/, '')
+  if (!base) return String(rel ?? '')
+  const text = String(rel ?? '')
+  const hash = text.indexOf('#')
+  const file = hash < 0 ? text : text.slice(0, hash)
+  const title = hash < 0 ? '' : text.slice(hash)
+  return `${base}/${file}${title}`
+}
+
+/**
  * Render search hits for the model. Snippets are whole blocks: line
  * structure is preserved (continuation lines indented) so the agent can
- * scan the block directly instead of opening the source file.
+ * scan the block directly instead of opening the source file. When
+ * `rootDir` is given, every row shows the hit's ABSOLUTE file path
+ * (`$DSH_HOME/dsh-memory/...`) instead of the root-relative rel — the
+ * calling agent cannot be assumed to know where the memory root lives, so
+ * the path must be directly usable with its native read/edit tools
+ * (2026-08-25).
  */
-export function formatHits(hits) {
+export function formatHits(hits, rootDir = '') {
   if (hits.length === 0) return 'No memory found.'
   const lines = []
   for (const hit of hits) {
     const tag = hit.date || 'index'
-    lines.push(`- [${tag}] ${hit.rel} (score ${formatScore(hit.score)})`)
+    lines.push(`- [${tag}] ${displayPath(hit.rel, rootDir)} (score ${formatScore(hit.score)})`)
     const s = String(hit.snippet ?? '')
     lines.push(s.split('\n').map((l, i) => (i === 0 ? `  ${l}` : `    ${l}`)).join('\n'))
   }

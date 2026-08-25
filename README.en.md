@@ -24,8 +24,8 @@ shares one package instance.
 |---|---|
 | **Per-turn reminder (optional)** | A short system-prompt reminder assembled on every request: "when this turn has something worth keeping across sessions, you MUST use the memory tool". Deliberately terse — the timing, content rules, and usage live in the `memory` tool description. Turn it off with `autoMemory: false` for a "record only when asked" style; the neutral `memory` tool stays usable |
 | **memory tool** | A path locator with **no arguments**: returns today's memory note for this workspace (one file per workspace per day). When the file is absent it is **created** (content = the `<!-- 会话来源: ... -->` session-source comment); when present the calling session is merged into that comment (exactly idempotent). The description carries the capture timing (decisions and reasons, user corrections/conventions, pitfalls and fixes, reusable commands/processes, state changes) and the quality rules (read before modify; edit local changes, write to create/replace the whole file; # headings per topic, merge related topics, fix outdated items in a sentence or two, no play-by-play). All file work dispatches the host's **native read/write pipeline** — same sandbox fence and read-before-modify observation as the model's own file tools (`$DSH_HOME` writes need danger-full-access) |
-| **memory_search tool** | Heading-aware block-level retrieval (any heading splits a block, breadcrumbs included), **two-group keyword scoring** (2026-08-24): `primary` ≤2 keywords at high weight (×3 each hit) + `secondary` ≤3 at low weight (×1 each) — partial credit per matched keyword, no hard AND gate (a block missing some words no longer vanishes); formatting-tolerant matching, occurrence counts normalized by block length, **per-day decay** (30-day half-life, floor 0.4); snippets return whole blocks (≤1000 chars, usually no need to open the file) |
-| **Two-layer library (2026-08-24)** | Diary layer `YYYY-MM-DD/` (ephemeral, **hard window** `dailyWindowDays` default 90 days — aged notes leave the searchable corpus but stay on disk; 0 = unlimited) + long-term layer `memory/memory.md` (ONE file organized by topic headings, **never decays, never windowed**). Composition-based hints at query time: long-term blocks in the results → they win conflicts, stale statements get fixed and missing lasting facts supplemented in place; diary-only results with aged hits → suggest supplementing memory.md (**old diaries get no maintenance** — they decay and age out on their own; same-day corrections belong to the `memory` tool). When no long-term block makes the list, the LAST slot is reserved for it (with limit ≥ 2). No hit counters, zero state files |
+| **memory_search tool** | Heading-aware block-level retrieval (any heading splits a block, breadcrumbs included), **single-field positional keyword scoring** (2026-08-25): ONE `keywords` parameter holding up to 7 space-separated terms — the **first 3 at high weight** (×3 each hit), the next 4 at low weight (×1 each) — partial credit per matched keyword, no hard AND gate (a block missing some words no longer vanishes); a **minimum-score floor `MIN_SCORE=0.5`** drops too-weak partial matches outright; formatting-tolerant matching, occurrence counts normalized by block length, **per-day decay** (30-day half-life, floor 0.4); snippets return whole blocks (≤1000 chars, usually no need to open the file); **every hit carries its ABSOLUTE path** (`$DSH_HOME/dsh-memory/...`, directly usable with native read/edit) |
+| **Two-layer library (2026-08-24)** | Diary layer `YYYY-MM-DD/` (ephemeral, **hard window** `dailyWindowDays` default 90 days — aged notes leave the searchable corpus but stay on disk; 0 = unlimited) + long-term layer `memory/memory.md` (ONE file organized by topic headings, **never decays, never windowed**). Whenever a search returns results, ONE unconditional hint is appended: record lasting facts referenced above into the matching memory.md topic heading and fix outdated statements there; empty results stay quiet. When no long-term block makes the list and `longtermAppend` is on (default), the best-ranking one from the candidate pool is APPENDED after the regular results (never evicting, works with limit=1). No hit counters, zero state files |
 | **Vector fusion (optional)** | With an Ollama-compatible embedding service configured, upgrades automatically to keyword + vector RRF fusion (k=60); falls back to pure keyword matching when the service is down — `memory_search` never fails because of vectors |
 | **Config card** | Settings → Plugins → Plugin config → Memory; hot-reloads on save (persisted to settings.yaml, no restart) |
 
@@ -88,14 +88,19 @@ commits).
   called the `memory` tool, so its source is already maintained
 - `src/search.js`: any heading (`#`–`######`) is a chunk boundary and
   subsections become standalone blocks with ancestor breadcrumbs;
-  **two-group keyword scoring** — `primary` (≤2, essential terms) scores ×3
-  per hit, `secondary` (≤3, refining terms) ×1, partial credit per matched
-  keyword (2026-08-24, replacing the old tier scheme whose tier-3 hard AND
-  zeroed blocks matching only some words — the measured root cause of
-  misses); both sides go through `looseNormalize` (formatting marks stripped,
-  identifiers `-` `_` `.` kept); the weighted count is normalized by block
-  length; each block's score is multiplied by `max(0.4, 0.5^(days/30))`
-  (per-day decay); exact dedup via `rel#breadcrumb`
+  **single-field positional keyword scoring** — one `keywords` string split on
+  whitespace, the **first 3 terms are essential (×3 per hit)** and the **next
+  4 refining (×1)**, first-occurrence dedupe, over-cap drops reported back
+  (2026-08-25, replacing the explicit two-parameter groups to match the
+  single-query-field convention of mainstream tools; partial credit per
+  matched keyword carries over from the 2026-08-24 fix whose measured root
+  cause was tier-3's hard AND zeroing partial matches); both sides go through
+  `looseNormalize` (formatting marks stripped, identifiers `-` `_` `.` kept);
+  the weighted count is normalized by block length; each block's score is
+  multiplied by `max(0.4, 0.5^(days/30))` (per-day decay); blocks under
+  `MIN_SCORE=0.5` never return (primary matches survive even at the recency
+  floor ~0.6, while isolated context-term noise on old blocks is cut);
+  exact dedup via `rel#breadcrumb`
 - `src/embed.js`: optional vector path — in-memory index with sha1 signature
   caching (unchanged files are never re-embedded), cosine ≥ 0.45 joins the
   fusion, RRF k=60; embedding model defaults to `bge-m3`
@@ -119,10 +124,11 @@ commits).
 ## Usage
 
 ```sh
-# model-side tool: search the memory library (two keyword groups: primary ≤2
-# high-weight, secondary ≤3 low-weight; partial credit per matched keyword —
-# older notes rank lower but stay reachable, newer notes win)
-memory_search primary="vector search threshold" secondary="embedding"
+# model-side tool: search the memory library (ONE keywords parameter, up to 7
+# terms, most essential FIRST — first 3 high-weight, next 4 low-weight;
+# partial credit per matched keyword — older notes rank lower but stay
+# reachable, newer notes win; too-weak hits are dropped by the score floor)
+memory_search keywords="vector search threshold embedding"
 
 # model-side tool: locate today's memory note — returns the path, creates the
 # file (with the source comment) when absent, merges this session into the
@@ -154,6 +160,7 @@ dsh-memory:
   embeddingBaseUrl: ''      # Ollama-compatible /api/embed base URL (e.g. http://localhost:11434); empty disables vector search
   embeddingModel: 'bge-m3'  # embedding model name
   autoMemory: true          # per-turn reminder ("worth keeping -> must use the memory tool"); false = record only when asked
+  longtermAppend: true      # when no long-term block made the list, append the best-ranking one (no eviction); false = pure top-N
 ```
 
 ## Requirements

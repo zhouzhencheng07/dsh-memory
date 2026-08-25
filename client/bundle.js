@@ -48,6 +48,8 @@ window.__ModuleLoader__.load({
       embeddingModelHint: "Embedding model name served by the base URL (e.g. bge-m3).",
       autoMemory: "Per-turn memory reminder",
       autoMemoryHint: "Remind every turn: when something is worth keeping across sessions, the memory tool must be used. Off = record only when asked.",
+      longtermAppend: "Append long-term block",
+      longtermAppendHint: "When no memory/memory.md block is among the results, append the best-ranking one after them instead of leaving it out.",
       overridden: "Overridden",
       reset: "Reset to default",
       save: "Save",
@@ -74,6 +76,8 @@ window.__ModuleLoader__.load({
       embeddingModelHint: "该服务上的嵌入模型名（如 bge-m3）。",
       autoMemory: "每轮记忆提醒",
       autoMemoryHint: "每轮提醒：本轮有值得跨会话保留的内容时必须使用 memory 工具；关闭后仅在明确要求时记录。",
+      longtermAppend: "长期块追加返回",
+      longtermAppendHint: "结果中没有 memory/memory.md 块时，在其后追加一条排名最高的长期块（不挤占名额）。",
       overridden: "已覆盖",
       reset: "恢复默认",
       save: "保存",
@@ -148,14 +152,23 @@ window.__ModuleLoader__.load({
         hint: "autoMemoryHint",
         format: (value) => (value === false ? "false" : "true"),
         parse: (text) => ({ kind: "set", value: text === "true" })
+      },
+      longtermAppend: {
+        kind: "bool",
+        label: "longtermAppend",
+        hint: "longtermAppendHint",
+        format: (value) => (value === false ? "false" : "true"),
+        parse: (text) => ({ kind: "set", value: text === "true" })
       }
       // ── autoMemory restored 2026-08-23: the per-turn reminder is the capture
       // path again (SHORT text — "worth keeping → must use the memory tool");
       // content rules live in the memory tool description. Off = no reminder;
       // the neutral memory tool stays usable. No end-of-turn hook, no
       // tools/result provenance hook (the memory tool maintains provenance). ──
+      // ── longtermAppend added 2026-08-25: the long-term append seat is now a
+      // user-facing toggle (host default true = additive seat on). ──
     };
-    const FIELDS = ["searchLimit", "dailyWindowDays", "embeddingBaseUrl", "embeddingModel", "autoMemory"];
+    const FIELDS = ["searchLimit", "dailyWindowDays", "embeddingBaseUrl", "embeddingModel", "autoMemory", "longtermAppend"];
 
     // ── theme-aligned styles (dsw alias tokens, as the official cards use) ──
     // (dropped during the migration rewrite once — the card then crashed every

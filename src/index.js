@@ -7,10 +7,16 @@
 // Design (agreed with the user, 2026-08-16/17/18/22/25):
 //   - memory = reusable experience reference (decisions, pitfalls, ideas),
 //     NOT a project archive; project detail lives in the workspace docs.
-//   - retrieval: memory_search over the daily notes (block-level; TWO-GROUP
-//     keyword scoring 2026-08-24 — primary ≤2 ×3, secondary ≤3 ×1, partial
-//     credit per matched keyword, no hard AND gate — plus optional vector,
-//     recency-weighted). The digest/dream layer was REMOVED
+//   - retrieval: memory_search over the daily notes (block-level;
+//     POSITIONAL keyword scoring 2026-08-25 — ONE `keywords` parameter of up
+//     to 7 terms, first 3 ×3 then next 4 ×1, partial credit per matched
+//     keyword, no hard AND gate, MIN_SCORE floor — plus optional vector,
+//     recency-weighted). Long-term etiquette 2026-08-25: whenever results
+//     came back, ONE unconditional hint points lasting-fact writes at
+//     memory/memory.md; and when no long-term block made the cut, the best
+//     ranking one from the candidate pool is APPENDED after the regular
+//     results (config `longtermAppend`, additive — never evicts). The
+//     digest/dream layer was REMOVED
 //     (2026-08-18, user decision): memory notes are edited in place and carry
 //     their date in the rel, so recency guidance ("newer notes win conflicts,
 //     older notes still hold details") plus a recency decay in ranking covers
@@ -57,7 +63,7 @@ import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-sett
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { CallId } from '@deepseek-ai/dsh-llm'
 import { memoryRoot, mergeProvenance, readMemoryFile, sessionSlug, todayStamp, walkMemory } from './store.js'
-import { formatHits, fuseHits, parseKeywordGroups, searchMemory } from './search.js'
+import { formatHits, fuseHits, parseKeywords, searchMemory } from './search.js'
 import { EmbeddingClient, VectorIndex } from './embed.js'
 
 export const name = 'dsh-memory'
@@ -91,6 +97,10 @@ export const Config = z.object({
   /** Per-turn system-prompt reminder ("use the memory tool when something is
    * worth keeping"); off = no reminder, the neutral memory tool remains. */
   autoMemory: z.boolean().default(true),
+  /** Long-term append seat (2026-08-25): when no memory/ block made the
+   * results, the best-ranking one from the candidate pool is APPENDED after
+   * them (never evicting a regular result). Off = pure top-N. */
+  longtermAppend: z.boolean().default(true),
 })
 
 const MAX_LIMIT = 10
@@ -101,35 +111,32 @@ const MAX_LIMIT = 10
  * the `memory` tool stays a single-path daily locator by design. */
 const LONGTERM_REL = 'memory/memory.md'
 const LONGTERM_DIR_PREFIX = 'memory/'
-/** A diary hit older than this many days triggers the promotion hint. */
-const PROMOTION_HINT_MIN_AGE_DAYS = 7
 
 function memorySearchTool(ctx, getConfig, getVectorIndex) {
   return {
     name: 'memory_search',
     description:
-      'Search the cross-session memory library: recent daily notes plus the long-term memory/memory.md. ' +
-      'Keywords go in two groups: `primary` (up to 2) and `secondary` (up to 3), whitespace-separated and matched literally with partial credit per keyword hit — pick tokens actually written in the notes rather than synonyms. ' +
-      'Returns block-level hits whose snippet is the whole block; when no long-term block makes the list, the last slot is reserved for one. ' +
-      'Supplements to memory/memory.md stay concise: split long content under deeper headings.',
+      'Search the cross-session memory library by literal keyword matching with partial credit per matched keyword. ' +
+      '`keywords` holds up to 7 space-separated terms, most essential FIRST — earlier terms weigh more; pick words the notes actually contain, not synonyms. ' +
+      'Returns block-level hits whose snippet is the whole block; low-scoring hits are dropped. ' +
+      'When a hit is not enough on its own, open its source file and continue from the matching block.',
     parameters: {
-      primary: { type: 'string', required: true, description: 'Up to 2 space-separated keywords — terms a relevant note likely contains verbatim' },
-      secondary: { type: 'string', description: 'Up to 3 optional space-separated keywords — refining/context terms' },
+      keywords: { type: 'string', required: true, description: 'Up to 7 space-separated terms, most essential first — earlier terms weigh more' },
     },
     output: {
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     async execute(args) {
-      const kw = parseKeywordGroups(String(args.primary ?? ''), String(args.secondary ?? ''))
-      if (kw.primary.length === 0 && kw.secondary.length === 0) throw new Error('memory_search: no usable keywords in primary/secondary')
+      const kw = parseKeywords(String(args.keywords ?? ''))
+      if (kw.primary.length === 0 && kw.secondary.length === 0) throw new Error('memory_search: no usable keywords')
       // Result count is locked to the configured searchLimit (user decision
       // 2026-08-22): no agent-facing override.
       const limit = Math.min(Math.max(Number(getConfig().searchLimit) || 5, 1), MAX_LIMIT)
       const windowDays = Math.max(0, Math.floor(Number(getConfig().dailyWindowDays) || 0))
       const entries = walkMemory(windowDays)
       // gather a candidate pool several times the result window so fusion and
-      // the long-term reservation have room to rank
+      // the long-term append seat have room to rank
       const poolSize = Math.min(limit * 3, MAX_LIMIT * 3)
       const sub = searchMemory(entries, kw.primary, kw.secondary, poolSize)
       const index = getVectorIndex()
@@ -144,40 +151,35 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
           console.warn(`dsh-memory: vector search unavailable (${error?.message ?? String(error)}), using substring results`)
         }
       }
-      let hits = (fused ?? sub).slice(0, limit)
-      // Long-term reservation (user decision 2026-08-24): when the window has
-      // room (limit ≥ 2 — never evict a sole result) and no memory/ block
-      // made the cut, the LAST slot yields to the best-ranking long-term
-      // block from the pool. Evergreen facts must surface even when fresher
-      // diary noise outscores them.
+      const ranked = fused ?? sub
+      const hits = ranked.slice(0, limit)
+      // Long-term append seat (2026-08-25, replaces the 2026-08-24 last-slot
+      // eviction): when NO long-term block made the cut, the best-ranking one
+      // from the candidate pool is APPENDED after the regular results — it
+      // never evicts anything, and works for limit=1 too. The seat is NOT
+      // mandatory: the candidate must exist (i.e. have cleared MIN_SCORE and
+      // ranked into the pool). Off by config `longtermAppend: false`.
       const isLongterm = (h) => String(h?.rel ?? '').startsWith(LONGTERM_DIR_PREFIX)
-      if (limit >= 2 && !hits.some(isLongterm)) {
-        const reserve = (fused ?? sub).slice(limit).find(isLongterm)
-        if (reserve) hits[limit - 1] = reserve
+      if (getConfig().longtermAppend !== false && hits.length > 0 && !hits.some(isLongterm)) {
+        const reserve = ranked.slice(limit).find(isLongterm)
+        if (reserve) hits.push(reserve)
       }
       // tell the calling model when its input was trimmed, so the next call
-      // respects the caps (primary ≤ 2, secondary ≤ 3)
-      let out = formatHits(hits)
+      // respects the cap (keywords ≤ 7); rows carry ABSOLUTE file paths —
+      // the agent cannot be assumed to know $DSH_HOME/dsh-memory, so both
+      // the hits and the long-term target below must be directly usable
+      // with its native read/edit tools
+      const rootDir = memoryRoot()
+      let out = formatHits(hits, rootDir)
       if (kw.notices.length > 0) out = `${kw.notices.join('; ')}\n${out}`
-      // Long-term layer etiquette (user decision 2026-08-24): promotion and
-      // in-place correction are considered AT RETRIEVAL TIME, computed from
-      // the RESULT COMPOSITION (no counters, no state):
-      //   - long-term blocks participated → they win conflicts; fix stale
-      //     statements there and supplement missing lasting facts;
-      //   - diary-only results with aged hits → suggest supplementing
-      //     memory/memory.md. Old diaries themselves get NO maintenance —
-      //     they decay and age out on their own; same-day corrections are
-      //     the `memory` tool's business.
+      // One unconditional success hint (2026-08-25, simplifies the 2026-08-24
+      // composition-based branches): ANY non-empty result ends with the same
+      // pointer to the long-term file — record lasting facts there, fix stale
+      // ones. No results → no hint. The path is ABSOLUTE: a bare
+      // `memory/memory.md` would not resolve for the calling model.
       if (hits.length > 0) {
-        if (hits.some(isLongterm)) {
-          out += '\nNote: results include long-term memory (memory/memory.md) — on conflicts with older diary notes it wins; fix outdated statements in the matching topic blocks and supplement missing lasting facts there (read before edit).'
-        } else {
-          const agedMs = Date.now() - PROMOTION_HINT_MIN_AGE_DAYS * 86400000
-          const hasAged = hits.some((h) => { const ms = Date.parse(String(h.date ?? '')); return Number.isFinite(ms) && ms < agedMs })
-          if (hasAged) {
-            out += '\nNote: if the above contains facts that should last (user preferences, environment facts, standing conventions, recurring pitfalls), add them to the matching topic block in memory/memory.md (read before edit); old diaries get no maintenance — they simply age out.'
-          }
-        }
+        const ltAbs = `${String(rootDir).replaceAll('\\', '/').replace(/\/+$/, '')}/memory/memory.md`
+        out += `\nNote: add factual information referenced above that will be reused long term to the matching topic heading in ${ltAbs} (read before edit); fix outdated statements there.`
       }
       return out
     },
@@ -270,6 +272,7 @@ export function apply(ctx) {
     embeddingBaseUrl: '',
     embeddingModel: 'bge-m3',
     autoMemory: true,
+    longtermAppend: true,
   }
   const runtime = { ...DEFAULTS }
   {
@@ -280,6 +283,7 @@ export function apply(ctx) {
       runtime.embeddingBaseUrl = source.embeddingBaseUrl ?? ''
       runtime.embeddingModel = source.embeddingModel || 'bge-m3'
       runtime.autoMemory = source.autoMemory !== false
+      runtime.longtermAppend = source.longtermAppend !== false
     }
     // setSource hands over a THUNK (() => scope.get()), not the value; it
     // fires at attach/detach, while every committed change goes through

@@ -98,13 +98,15 @@ export const inject = ['tools']
  * `.max()` and plain defaults (a field without `.required()` is optional).
  */
 export const Config = z.object({
-  /** Default result count for memory_search. */
-  searchLimit: z.natural().min(1).max(10).default(5),
-  /** Hard window in days for the DAILY notes (user decision 2026-08-24):
-   * dated notes older than this leave the searchable corpus (files stay on
-   * disk). 0 disables the window. Long-term topic files (memory/) are never
-   * windowed and never decay. */
-  dailyWindowDays: z.natural().default(90),
+  /** Default result count for memory_search (user decision 2026-08-29: 2 is
+   * enough now that the longtermAppend seat surfaces a long-term block). */
+  searchLimit: z.natural().min(1).max(10).default(2),
+  /** Hard window in days for the DAILY notes (user decision 2026-08-24;
+   * lowered 90 → 45 days on 2026-08-29 — agent work iterates fast, stale
+   * diaries stop earning their tokens): dated notes older than this leave
+   * the searchable corpus (files stay on disk). 0 disables the window.
+   * Long-term topic files (memory/) are never windowed and never decay. */
+  dailyWindowDays: z.natural().default(45),
   /** Ollama base URL for optional vector search (e.g. http://localhost:11434); empty disables it. */
   embeddingBaseUrl: z.string(),
   /** Embedding model served by embeddingBaseUrl. */
@@ -401,8 +403,8 @@ export function apply(ctx) {
   // plugin activates, and a skipped registration makes settings.mutate fail
   // with "settings namespace ... is not registered".
   const DEFAULTS = {
-    searchLimit: 5,
-    dailyWindowDays: 90,
+    searchLimit: 2,
+    dailyWindowDays: 45,
     embeddingBaseUrl: '',
     embeddingModel: 'bge-m3',
     autoMemory: true,

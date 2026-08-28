@@ -19,12 +19,12 @@ Bundle plugin form (`dsh.bundle`) — 0 patches, **zero npm dependencies, zero
 build step**; `@deepseek-ai/*` resolves through dsh's flat module fallback,
 so the runtime shares one package instance.
 
-> ⚠️ **Personal project — use with caution.** This is a casually designed,
-> personal memory system. The storage layout, tool interface, and config
-> options may change frequently and WITHOUT compatibility guarantees
-> (breaking changes are the norm). Check the commit history before upgrading,
-> and back up your memory files under `$DSH_HOME/dsh-memory/` if they matter
-> to you.
+> ⚠️ **Use with caution.** A memory system designed around personal ideas
+> (after studying several agents) — works well for me but may not suit
+> everyone. The storage layout, tool interface, and config options may change
+> frequently and WITHOUT compatibility guarantees (breaking changes are the
+> norm). Check the commit history before upgrading, and back up your memory
+> files under `$DSH_HOME/dsh-memory/` if they matter to you.
 
 ## Features
 
@@ -33,7 +33,7 @@ so the runtime shares one package instance.
 | **Per-turn reminder (optional)** | A short system-prompt reminder assembled on every request, TIMING ONLY: "when this turn has something worth keeping across sessions, you MUST use the memory tool". Turn it off with `autoMemory: false` for a "record only when asked" style; the `memory` tool stays usable. Usage mechanics and organization rules live entirely in the `memory` tool description |
 | **memory tool (three-mode file tool, 2026-08-28)** | **No arguments = read today's note**: returns the full text of this workspace's note for today (ABSENT — listing existing long-term topics — when there is none, zero disk writes); `mode:"write"` + `content` creates or fully replaces; `mode:"edit"` + `old_string`/`new_string` (+`replace_all`) does a unique literal replace; the optional `topic` parameter targets a long-term library file `memory/<topic>.md`. **Observation guard mirrors the native tools**: per-session present/absent + version records — write refused when the file exists but was not read this session (createIfAbsent), write/edit refused when the file changed since that read (CAS "read it again"), edit refused when unread (FS_NOT_OBSERVED), old_string refused on multiple matches (FS_AMBIGUOUS_EDIT); atomic tmp+rename writes. **The plugin writes its own data root directly** (trusted node:fs writes; paths are tool-derived or whitelist-validated, the model only supplies content) — bypassing the sandbox fence built into the fs backend (its per-write manual escalation is unusable for automatic capture), so **capture works under every permission mode, workspace-write included**. **Organization rules live in the description**: record experience, not play-by-play; `#` headings; merge related topics; correct outdated statements in place — sent with the tool schema on every request |
 | **memory_search tool** | Heading-aware block-level retrieval (any heading splits a block, breadcrumbs included), **single-field positional keyword scoring** (2026-08-25): ONE `keywords` parameter holding up to 7 space-separated terms — the **first 3 at high weight** (×3 each hit), the next 4 at low weight (×1 each) — partial credit per matched keyword, no hard AND gate; a **minimum-score floor `MIN_SCORE=0.5`**; formatting-tolerant matching, occurrence counts normalized by block length, **per-day decay** (30-day half-life, floor 0.4); snippets return whole blocks (≤1000 chars); **every hit carries its ABSOLUTE path**. The promotion/correction hint is COMPOSITION-DRIVEN and appended to the output (2026-08-29): a long-term block among the hits ⇒ treat as authoritative, fix stale statements in place, merge overlapping topic files; daily-only hits ⇒ file proved-lasting facts into `memory/<topic>.md` via the memory tool; empty results stay quiet |
-| **Two-layer library** | Diary layer `YYYY-MM-DD/` (ephemeral, **hard window** `dailyWindowDays` default 90 days — aged notes leave the searchable corpus but stay on disk; 0 = unlimited) + long-term layer `memory/<topic>.md` (**free topic files**, 2026-08-28: one topic per file, never decays, never windowed; the search layer supports this with zero changes). Division of labor: **experience that still holds in another project goes to the long-term layer** (environment/tooling lessons, collaboration preferences, general patterns); play-by-play events go to the diary; **must-follow rules belong in AGENTS.md, not memory**; durable project-specific facts graduate into AGENTS.md or age out with the diary window (an accepted trade-off that forces curation). **The long-term layer is consolidated at reuse time only** — writes follow the search-result composition, never pre-judged at capture. No hit counters, zero state files |
+| **Two-layer library** | Diary layer `YYYY-MM-DD/` (ephemeral, **hard window** `dailyWindowDays` default 45 days — agent work iterates fast, so aged notes leave the searchable corpus but stay on disk; 0 = unlimited) + long-term layer `memory/<topic>.md` (**free topic files**, 2026-08-28: one topic per file, never decays, never windowed; the search layer supports this with zero changes). Division of labor: **experience that still holds in another project goes to the long-term layer** (environment/tooling lessons, collaboration preferences, general patterns); play-by-play events go to the diary; **must-follow rules belong in AGENTS.md, not memory**; durable project-specific facts graduate into AGENTS.md or age out with the diary window (an accepted trade-off that forces curation). **The long-term layer is consolidated at reuse time only** — writes follow the search-result composition, never pre-judged at capture. No hit counters, zero state files |
 | **Vector fusion (optional)** | With an Ollama-compatible embedding service configured, upgrades automatically to keyword + vector RRF fusion (k=60); falls back to pure keyword matching when the service is down — `memory_search` never fails because of vectors |
 | **Config card** | Settings → Plugins → Plugin config → Memory; hot-reloads on save (persisted to settings.yaml, no restart) |
 
@@ -159,8 +159,8 @@ the settings card):
 
 ```yaml
 dsh-memory:
-  searchLimit: 5            # number of results returned by memory_search (1-10); a hard cap the agent cannot override
-  dailyWindowDays: 90       # diary hard window in days: aged diaries stop participating in search (0 = unlimited); memory/ is exempt
+  searchLimit: 2            # number of results returned by memory_search (1-10); a hard cap the agent cannot override; a long-term block is still surfaced by the longtermAppend seat
+  dailyWindowDays: 45       # diary hard window in days: aged diaries stop participating in search (0 = unlimited); memory/ is exempt
   embeddingBaseUrl: ''      # Ollama-compatible /api/embed base URL (e.g. http://localhost:11434); empty disables vector search
   embeddingModel: 'bge-m3'  # embedding model name
   autoMemory: true          # per-turn reminder ("worth keeping -> must use the memory tool"); false = record only when asked

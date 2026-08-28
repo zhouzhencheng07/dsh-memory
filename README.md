@@ -6,7 +6,7 @@
 
 主 agent 每轮判定是否有值得跨会话保留的内容：**每轮 system prompt 提醒**（"When this turn produced something worth keeping across sessions, you MUST use the `memory` tool."——`autoMemory: false` 可关）把时机指给 **`memory` 文件工具**（read/write/edit 三模式，语义镜像原生文件工具，读写面锁定在插件数据根 `$DSH_HOME/dsh-memory` 内；描述承载使用机制与组织规则）；**`memory_search` 工具**对记忆做**块级检索**（可选向量融合、按日衰减），**长期层的写入跟随检索结果的组成指引**——被搜到才说明值得长存，不在捕获时预判。官方 bundle 插件形态（`dsh.bundle`），0 patch、**零 npm 依赖、零构建**——`@deepseek-ai/*` 由 dsh 运行时扁平 fallback 提供，与运行实例共享同一份包。
 
-> ⚠️ **个人项目，谨慎使用。** 这是一套为个人工作流随手设计的记忆系统，存储布局、工具接口与配置项都可能**频繁调整且不含兼容性保证**（破坏性改动是常态）。升级前请先看提交记录；`$DSH_HOME/dsh-memory/` 下的记忆文件如有价值请自行备份。
+> ⚠️ **谨慎使用。** 这是一套个人参考部分agent后，凭个人想法设计的记忆系统，自用良好但不一定适合大家。存储布局、工具接口与配置项都可能**频繁调整且不含兼容性保证**（破坏性改动是常态）。升级前请先看提交记录；`$DSH_HOME/dsh-memory/` 下的记忆文件如有价值请自行备份。
 
 ## 能力
 
@@ -15,7 +15,7 @@
 | **每轮提醒（可关）** | 短 system-prompt 提醒（英文，对齐官方提示词口径），每次请求重新组装，**只讲时机**："When this turn produced something worth keeping across sessions, you MUST use the \`memory\` tool."；`autoMemory: false` 关闭后走"仅在要求时记录"路线，`memory` 工具照常可用。使用手法与组织规则全部在 `memory` 工具描述里，不占提醒篇幅 |
 | **memory 工具（三模式文件工具，2026-08-28）** | **无参 = 读今日笔记**：返回本工作区今日记忆文件全文（不存在返回 ABSENT 并列出现有长期 topic，**零写盘**）；`mode:"write"` + `content` 新建/整文件替换；`mode:"edit"` + `old_string`/`new_string`（+`replace_all`）唯一匹配字面替换；可选 `topic` 参数定位长期库文件 `memory/<topic>.md`。**观察守卫镜像原生**：按会话记录 present/absent + 版本——未读已存在时 write 拒绝（createIfAbsent）、读后被改动时 write/edit 拒绝（CAS "read it again"）、edit 未读拒绝（FS_NOT_OBSERVED 同款）、old_string 多处匹配拒绝（FS_AMBIGUOUS_EDIT 同款）；tmp+rename 原子写。**插件直写自己的数据根**（node:fs 可信写入，路径由工具派生或白名单校验，模型只提供内容）——绕开 fs backend 内置的沙箱栅栏（其 per-write 人工升级通道对自动捕获不可用），**任何权限模式下（含 workspace-write）捕获均可用**。**组织规则在描述里**：记经验不记流水、`#` 标题组织、同类合并、过时就地修正，随工具 schema 每请求下发 |
 | **memory_search 工具** | 标题感知块级检索（任意标题切块、带面包屑）、**单字段位置加权关键词**（2026-08-25）：一个 `keywords` 参数最多 7 个空格分隔的词——**前 3 个高权重**（每个命中 ×3）、后 4 个低权重（每个命中 ×1），逐词部分分、无硬 AND 门禁；**最低分过滤 `MIN_SCORE=0.5`**；去格式符宽容匹配、命中数按块长归一、**按日衰减**（30 天半衰、下限 0.4）；snippet 返回整个块（≤1000 字符）；**每条命中带绝对路径**。**固化/修正指引按结果组成分支附加在输出末尾**（2026-08-29）：命中长期块 → 以它为准、过时就地修正、重叠主题合并；纯日记命中 → 值得长存的事实经 memory 工具写入 `memory/<topic>.md`；空结果不提示 |
-| **两层记忆库** | 日记层 `YYYY-MM-DD/`（流水，**硬窗口** `dailyWindowDays` 默认 90 天——过期笔记不再参与检索但保留在磁盘；0=不限）+ 长期层 `memory/<topic>.md`（**自由主题分文件**，2026-08-28：一个主题一个文件，永不衰减、不受窗口限制；检索层零改动天然支持）。分工判据：**换个项目还成立的经验进长期层**（环境/工具教训、协作偏好、通用模式）；事件流水进日记；**必须遵守的规则进 AGENTS.md，不进记忆**；项目特定的长期事实毕业进 AGENTS.md 或随日记窗口自然过期（有意的取舍，逼着显式策展）。**长期层只在复用时固化**——是否写入跟随检索结果的组成指引，不在捕获时预判。无计数器、零状态文件 |
+| **两层记忆库** | 日记层 `YYYY-MM-DD/`（流水，**硬窗口** `dailyWindowDays` 默认 45 天——agent 迭代快，过期笔记不再参与检索但保留在磁盘；0=不限）+ 长期层 `memory/<topic>.md`（**自由主题分文件**，2026-08-28：一个主题一个文件，永不衰减、不受窗口限制；检索层零改动天然支持）。分工判据：**换个项目还成立的经验进长期层**（环境/工具教训、协作偏好、通用模式）；事件流水进日记；**必须遵守的规则进 AGENTS.md，不进记忆**；项目特定的长期事实毕业进 AGENTS.md 或随日记窗口自然过期（有意的取舍，逼着显式策展）。**长期层只在复用时固化**——是否写入跟随检索结果的组成指引，不在捕获时预判。无计数器、零状态文件 |
 | **向量融合（可选）** | 配置 Ollama 兼容嵌入服务后自动升级为关键词 + 向量 RRF 融合（k=60）；服务不可用自动回退纯关键词，`memory_search` 永不因向量失败 |
 | **配置卡片** | 设置 → 插件 → 插件配置 → 记忆，改完保存即热生效（settings.yaml 持久化，无需重启） |
 
@@ -83,8 +83,8 @@ memory topic="windows-env" mode="edit" old_string="pnpm 双实例" new_string="p
 
 ```yaml
 dsh-memory:
-  searchLimit: 5            # memory_search 返回条数（1-10）；硬约束，agent 不可覆盖
-  dailyWindowDays: 90       # 日记硬窗口（天）：过期日记不再参与检索（0=不限）；memory/ 长期层不受限
+  searchLimit: 2            # memory_search 返回条数（1-10）；硬约束，agent 不可覆盖；长期块由 longtermAppend 席位兜底
+  dailyWindowDays: 45       # 日记硬窗口（天）：过期日记不再参与检索（0=不限）；memory/ 长期层不受限
   embeddingBaseUrl: ''      # Ollama 兼容 /api/embed 基地址（如 http://localhost:11434）；留空禁用向量检索
   embeddingModel: 'bge-m3'  # 嵌入模型名
   autoMemory: true          # 每轮提醒（"值得保留→必须用 memory 工具"）；false = 仅在要求时记录

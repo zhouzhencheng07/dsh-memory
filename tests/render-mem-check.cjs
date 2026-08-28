@@ -37,8 +37,8 @@ let registered = null; // { entry, component } 从 slots.inject 捕获
 const scopeStub = {
   getSnapshot: () => ({
     status: "ready",
-    value: { searchLimit: 5, embeddingBaseUrl: "", embeddingModel: "bge-m3", autoMemory: true, longtermAppend: true },
-    base: { searchLimit: 5, embeddingBaseUrl: "", embeddingModel: "bge-m3", autoMemory: true, longtermAppend: true },
+    value: { searchLimit: 2, embeddingBaseUrl: "", embeddingModel: "bge-m3", autoMemory: true, longtermAppend: true },
+    base: { searchLimit: 2, embeddingBaseUrl: "", embeddingModel: "bge-m3", autoMemory: true, longtermAppend: true },
     user: {},
     writable: true,
   }),

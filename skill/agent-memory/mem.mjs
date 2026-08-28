@@ -3,16 +3,18 @@
 //
 // Shares ONE memory library with the dsh plugin: the same layout (daily
 // diaries `YYYY-MM-DD/<workspace-slug>.md` + long-term topic files
-// `memory/<topic>.md`), the same block-level keyword scoring (search.js is a
+// `topics/<topic>.md`), the same block-level keyword scoring (search.js is a
 // verbatim mirror of the plugin's src/search.js, byte-identity guarded by
 // tests/test-mem-skill.mjs). The dsh plugin stays the library's primary
 // writer (per-turn capture reminder, settings card); other agents use this
 // CLI to search and record against the same corpus.
 //
-// Home resolution: `--home <dir>` argument > `AGENT_MEMORY_HOME` environment
-// variable > error. There is deliberately NO default home — silently creating
-// a second, divergent library would be worse than refusing to run. Point
-// AGENT_MEMORY_HOME at the dsh plugin's data root (e.g. D:\agent\.dsh\dsh-memory).
+// Home resolution: the AGENT_MEMORY_HOME environment variable — the SAME
+// variable the dsh plugin resolves, so one machine-wide setting points every
+// agent at one library. There is deliberately NO default and NO --home flag:
+// silently creating a second, divergent library would be worse than refusing
+// to run. Point AGENT_MEMORY_HOME at the dsh plugin's data root
+// (e.g. D:\agent\.dsh\dsh-memory); changing it takes effect in NEW processes.
 //
 // Write guard: the plugin enforces a per-session observation guard in memory;
 // a CLI process is stateless between invocations, so the guard is a
@@ -51,8 +53,11 @@ const DEFAULT_LIMIT = 2
 const MAX_LIMIT = 10
 /** Default hard window for dated notes in days (plugin default: 45). 0 disables. */
 const DEFAULT_WINDOW_DAYS = 45
-/** Long-term topic directory prefix (rel paths like `memory/<topic>.md`). */
-const LONGTERM_DIR_PREFIX = 'memory/'
+/** Long-term layer classification: a rel whose FIRST path segment does not
+ * parse as a date is a long-term topic file (topics/<topic>.md — and any
+ * pre-rename memory/ files), mirroring the plugin and walkMemory's window
+ * rule instead of hardcoding a directory name. */
+const isLongtermRel = (rel) => !Number.isFinite(Date.parse(String(rel ?? '').split('/')[0]))
 /** Write cap, mirroring the plugin: memory notes are small curated files. */
 const MAX_WRITE_BYTES = 1024 * 1024
 /** Read display cap, mirroring store.readMemoryFile's indexing cap. */
@@ -70,7 +75,7 @@ Commands:
           essential FIRST (first 3 weigh x3, next 4 x1). --days 0 disables
           the diary window.
   read    [--topic NAME]
-          Print today's note for this workspace (or memory/<NAME>.md) with
+          Print today's note for this workspace (or topics/<NAME>.md) with
           its [hash: ...] footer. ABSENT output lists existing topics.
   write   [--topic NAME] [--expect-hash H]
           Create a file, or fully replace an existing one (then --expect-hash
@@ -78,7 +83,7 @@ Commands:
   edit    --expect-hash H [--topic NAME]
           Literal replacement. JSON on stdin: {"old":"...","new":"...","replace_all":false}
 
-Home: --home <dir>, or the AGENT_MEMORY_HOME environment variable (no default).`
+Home: the AGENT_MEMORY_HOME environment variable (no default, no flags).`
 
 // --- shared vocabulary (mirrors src/store.js; store.js itself imports
 // @deepseek-ai/dsh-home-paths and must stay dsh-only) ------------------------
@@ -114,7 +119,7 @@ function readMemoryFile(file, maxBytes = MAX_READ_BYTES) {
  * Walk the memory root (same shape as store.walkMemory): dated
  * subdirectories are the diary layer — names parsing as a date older than
  * `windowDays` leave the corpus; any other subdirectory (in practice
- * `memory/`, the long-term topic files) is always indexed and never decays
+ * `topics/`, the long-term topic files) is always indexed and never decays
  * (its unparseable "date" makes recencyWeight return 1).
  */
 export function walkMemory(root, windowDays = 0) {
@@ -169,12 +174,12 @@ function parseFlags(args) {
   return flags
 }
 
-function resolveHome(flags) {
-  const home = (typeof flags.home === 'string' ? flags.home : '') || String(process.env.AGENT_MEMORY_HOME ?? '').trim()
+function resolveHome() {
+  const home = String(process.env.AGENT_MEMORY_HOME ?? '').trim()
   if (!home) {
     throw new Error(
       'agent-memory: memory home is not configured — set the AGENT_MEMORY_HOME environment variable ' +
-        '(e.g. the dsh plugin data root) or pass --home <dir>',
+        '(e.g. the dsh plugin data root); this CLI deliberately has no default home',
     )
   }
   return resolve(home)
@@ -200,7 +205,7 @@ function atomicWrite(file, content) {
 /** Long-term topic names currently on disk (empty when the dir is absent). */
 function listTopics(root) {
   try {
-    return readdirSync(join(root, 'memory'))
+    return readdirSync(join(root, 'topics'))
       .filter((n) => n.endsWith('.md'))
       .map((n) => n.slice(0, -3))
       .sort()
@@ -209,7 +214,7 @@ function listTopics(root) {
   }
 }
 
-/** Today's diary note by default; `--topic` targets memory/<topic>.md. The
+/** Today's diary note by default; `--topic` targets topics/<topic>.md. The
  * regex plus the join keep every reachable path strictly inside the home —
  * the caller only ever supplies a single safe segment. */
 function resolveTarget(root, flags) {
@@ -219,7 +224,7 @@ function resolveTarget(root, flags) {
     return { file: join(root, todayStamp(), `${sessionSlug(cwd)}.md`), topic: '' }
   }
   if (!TOPIC_RE.test(topic)) throw new Error(`agent-memory: invalid topic "${topic}" — letters, digits, "-" or "_" only`)
-  return { file: join(root, 'memory', `${topic}.md`), topic }
+  return { file: join(root, 'topics', `${topic}.md`), topic }
 }
 
 // --- commands -------------------------------------------------------------------
@@ -235,7 +240,7 @@ function cmdSearch(root, flags) {
   const limit = Math.min(Math.max(Math.floor(Number(flags.limit ?? DEFAULT_LIMIT)) || DEFAULT_LIMIT, 1), MAX_LIMIT)
   const windowDays = Math.max(0, Math.floor(Number(flags.days ?? DEFAULT_WINDOW_DAYS) || 0))
   const ranked = searchMemory(walkMemory(root, windowDays), kw.primary, kw.secondary, limit * 3)
-  const isLongterm = (h) => String(h?.rel ?? '').startsWith(LONGTERM_DIR_PREFIX)
+  const isLongterm = (h) => isLongtermRel(h?.rel)
   const hits = ranked.slice(0, limit)
   // Long-term append seat (same as the plugin): when no long-term block made
   // the cut, the best-ranking one from the pool is APPENDED after the
@@ -251,7 +256,7 @@ function cmdSearch(root, flags) {
   if (hits.length > 0) {
     out += hits.some(isLongterm)
       ? '\nLong-term topic blocks above are authoritative (never windowed) — correct outdated statements in their topic files in place, and merge topic files that clearly overlap.'
-      : '\nIf a fact above proved worth keeping long term, file it into memory/<topic>.md (mem write --topic <name>) — update the matching topic file, or start a new one when none matches.'
+      : '\nIf a fact above proved worth keeping long term, file it into topics/<topic>.md (mem write --topic <name>) — update the matching topic file, or start a new one when none matches.'
   }
   return out
 }
@@ -265,7 +270,7 @@ function cmdRead(root, flags) {
       const topics = listTopics(root)
       out += topics.length > 0
         ? `\nExisting long-term topics: ${topics.join(', ')} (target with --topic <name>)`
-        : '\nLong-term topic files live under memory/<topic>.md (target with --topic <name>)'
+        : '\nLong-term topic files live under topics/<topic>.md (target with --topic <name>)'
     }
     return out
   }
@@ -345,7 +350,7 @@ export async function run(argv, stdin = '') {
   const [command, ...rest] = argv
   if (!command || command === '--help' || command === '-h') return USAGE
   const flags = parseFlags(rest)
-  const root = resolveHome(flags)
+  const root = resolveHome()
   if (command === 'search') return cmdSearch(root, flags)
   if (command === 'read') return cmdRead(root, flags)
   if (command === 'write') return cmdWrite(root, flags, stdin)

@@ -27,7 +27,7 @@ const seed = (dirParts, file, text) => {
 seed([dayStamp(0)], 'note.md', '# 今日流水\n\nalphaunique 只出现在今天的日记里。\n')
 seed([dayStamp(10)], 'note.md', '# 十天前\n\nbetaunique 出现在十天前的日记里，还没出窗。\n')
 seed([dayStamp(200)], 'note.md', '# 远古记录\n\ngammaunique 出现在两百天前的日记里，应被窗口挡住。\n')
-seed(['memory'], 'memory.md', '# 用户环境\n\ndeltaunique 记录在长期记忆里，永不衰减、不受窗口限制。\n')
+seed(['topics'], 'memory.md', '# 用户环境\n\ndeltaunique 记录在长期记忆里，永不衰减、不受窗口限制。\n')
 
 const plugin = await import('../src/index.js')
 
@@ -58,7 +58,7 @@ const rootPrefix = process.env.MEM_TEST_HOME.replaceAll('\\', '/') + '/dsh-memor
 const out1 = await search.execute({ keywords: 'alphaunique' })
 assert.match(out1, /今日流水/)
 assert.ok(out1.includes(`${rootPrefix}${dayStamp(0)}/note.md#`), `hits must carry ABSOLUTE file paths, got:\n${out1}`)
-assert.ok(out1.includes('file it via the memory tool into memory/<topic>.md'), 'daily-only hits end with the FILE-NEW promotion hint')
+assert.ok(out1.includes('file it via the memory tool into topics/<topic>.md'), 'daily-only hits end with the FILE-NEW promotion hint')
 assert.ok(!out1.includes('authoritative'), 'file-new branch excludes the authoritative branch')
 
 const outCap = await search.execute({ keywords: 'alphaunique extra1 extra2 extra3 extra4 extra5 extra6 extra7 extra8' })
@@ -69,14 +69,14 @@ await assert.rejects(() => search.execute({ keywords: '   ' }), /no usable keywo
 // --- hard daily window (default 90) -------------------------------------------
 const outOld = await search.execute({ keywords: 'gammaunique' })
 assert.match(outOld, /^No memory found\.$/, '200-day-old diary is outside the 90-day window')
-assert.ok(!outOld.includes('memory/<topic>'), 'empty results carry no promotion hint')
+assert.ok(!outOld.includes('topics/<topic>'), 'empty results carry no promotion hint')
 
 const outMid = await search.execute({ keywords: 'betaunique' })
 assert.match(outMid, /十天前/, '10-day-old diary stays inside the window')
 
 // --- long-term participation: first place is already long-term ------------------
 const outLong = await search.execute({ keywords: 'deltaunique' })
-assert.match(outLong, /memory\/memory\.md/)
+assert.match(outLong, /topics\/memory\.md/)
 assert.ok(outLong.includes('authoritative'), 'long-term block among hits ⇒ authoritative branch (2026-08-29)')
 assert.ok(!outLong.includes('file it via the memory tool'), 'authoritative branch excludes the file-new branch')
 assert.equal(rowCount(outLong), 1, 'long-term first place must NOT gain a duplicate append seat')
@@ -93,7 +93,7 @@ const { walkMemory } = await import('../src/store.js')
 const rels = (win) => walkMemory(win).map((e) => e.rel).sort()
 assert.ok(rels().some((r) => r.includes(dayStamp(200))), 'no window → everything indexed')
 const w90 = rels(90)
-assert.ok(w90.some((r) => r.startsWith('memory/')), 'the long-term file is never windowed')
+assert.ok(w90.some((r) => r.startsWith('topics/')), 'the long-term file is never windowed')
 assert.ok(w90.some((r) => r.includes(dayStamp(10))), 'in-window diary indexed')
 assert.ok(!w90.some((r) => r.includes(dayStamp(200))), 'out-of-window diary excluded')
 assert.equal(walkMemory('nonsense').length, walkMemory(0).length, 'non-numeric window behaves as disabled')
@@ -105,7 +105,7 @@ assert.equal(walkMemory('nonsense').length, walkMemory(0).length, 'non-numeric w
 // third row (never evicting 昨日流水).
 seed([dayStamp(0)], 'r-a.md', '# 近水楼台\n\nreservetoken 出现在今天的日记。reservetoken 再现一次。\n')
 seed([dayStamp(1)], 'r-b.md', '# 昨日流水\n\nreservetoken 出现在昨天的日记。reservetoken 再现一次。\n')
-seed(['memory'], 'memory-append.md', '# 追加测试\n\nreservetoken 出现在长期记忆里，永不衰减。\n')
+seed(['topics'], 'memory-append.md', '# 追加测试\n\nreservetoken 出现在长期记忆里，永不衰减。\n')
 const search2 = boot({ searchLimit: 2 })
 const outAppend = await search2.execute({ keywords: 'reservetoken' })
 assert.match(outAppend, /近水楼台/, 'best diary keeps slot 1')

@@ -1,8 +1,10 @@
 // dsh-memory plugin for DeepSeek Harness (dsh)
 //
-// Cross-session memory: daily per-workspace notes under
-// $DSH_HOME/dsh-memory/YYYY-MM-DD/, long-term topic files under
-// $DSH_HOME/dsh-memory/memory/, and memory search.
+// Cross-session memory: daily per-workspace notes under <memory root>/
+// YYYY-MM-DD/, long-term topic files under <memory root>/topics/, and memory
+// search. The root follows AGENT_MEMORY_HOME when set (the SAME variable the
+// agent-memory skill uses — one library shared with other agents), falling
+// back to the plugin data root $DSH_HOME/dsh-memory (see store.js).
 //
 // Design (agreed with the user, 2026-08-16..28):
 //   - memory = reusable experience reference (decisions, pitfalls, ideas),
@@ -32,19 +34,22 @@
 //     (config `longtermAppend`, additive — never evicts); it also flips the
 //     hint branch.
 //   - long-term layer = FREE TOPIC FILES (2026-08-28, user decision):
-//     memory/<topic>.md, one file per topic. walkMemory already indexes any
-//     non-date subdirectory (never windowed, never decayed), so this needed
-//     zero search changes. The earlier single memory/memory.md design
+//     topics/<topic>.md, one file per topic (renamed from memory/ on
+//     2026-08-29 — with the root itself being the memory library, "memory
+//     inside memory" was redundant; walkMemory indexes ANY non-date
+//     subdirectory, so pre-rename memory/ files stay searchable and the
+//     long-term classification is "first rel segment is not a date", not a
+//     directory-name check). The earlier single memory/memory.md design
 //     (2026-08-24) never shipped — the file was never created, so there is
 //     nothing to migrate. Durable project-specific facts have no layer by
-//     design: they graduate into the user's AGENTS.md or die in the 90-day
+//     design: they graduate into the user's AGENTS.md or die in the 45-day
 //     diary window (accepted trade-off, forces curation).
 //   - the `memory` tool (2026-08-28, user decision — replaces the 2026-08-23
 //     path locator): a THREE-MODE file tool mirroring the native read/write/
 //     edit contract. No arguments reads TODAY's note (ABSENT output lists
 //     existing topics); mode:"write" creates or fully replaces; mode:"edit"
 //     replaces a unique literal old_string; an optional `topic` parameter
-//     targets memory/<topic>.md. The observation guard mirrors
+//     targets topics/<topic>.md. The observation guard mirrors
 //     @deepseek-ai/dsh-fs-observation-policy semantics (per-session
 //     present/absent + version records; write refused on exists-unread and
 //     stale-version; edit refused when unread; unique-match enforcement).
@@ -105,7 +110,7 @@ export const Config = z.object({
    * lowered 90 → 45 days on 2026-08-29 — agent work iterates fast, stale
    * diaries stop earning their tokens): dated notes older than this leave
    * the searchable corpus (files stay on disk). 0 disables the window.
-   * Long-term topic files (memory/) are never windowed and never decay. */
+   * Long-term topic files (topics/) are never windowed and never decay. */
   dailyWindowDays: z.natural().default(45),
   /** Ollama base URL for optional vector search (e.g. http://localhost:11434); empty disables it. */
   embeddingBaseUrl: z.string(),
@@ -114,7 +119,7 @@ export const Config = z.object({
   /** Per-turn system-prompt reminder ("use the memory tool when something is
    * worth keeping"); off = no reminder, the memory tool remains usable. */
   autoMemory: z.boolean().default(true),
-  /** Long-term append seat (2026-08-25): when no memory/ block made the
+  /** Long-term append seat (2026-08-25): when no topics/ block made the
    * results, the best-ranking one from the candidate pool is APPENDED after
    * them (never evicting a regular result). Off = pure top-N. */
   longtermAppend: z.boolean().default(true),
@@ -122,8 +127,12 @@ export const Config = z.object({
 
 const MAX_LIMIT = 10
 
-/** Long-term topic directory prefix (rel paths like `memory/<topic>.md`). */
-const LONGTERM_DIR_PREFIX = 'memory/'
+/** Long-term layer classification: a rel whose FIRST path segment does not
+ * parse as a date is a long-term topic file (topics/<topic>.md — and any
+ * pre-rename memory/ files, which walkMemory keeps indexing). Date-based
+ * classification mirrors walkMemory's window rule instead of hardcoding
+ * directory names. */
+const isLongtermRel = (rel) => !Number.isFinite(Date.parse(String(rel ?? '').split('/')[0]))
 
 /** Write cap: memory files are small curated notes; refuse runaway content. */
 const MAX_WRITE_BYTES = 1024 * 1024
@@ -181,7 +190,7 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
       // never evicts anything, and works for limit=1 too. The seat is NOT
       // mandatory: the candidate must exist (i.e. have cleared MIN_SCORE and
       // ranked into the pool). Off by config `longtermAppend: false`.
-      const isLongterm = (h) => String(h?.rel ?? '').startsWith(LONGTERM_DIR_PREFIX)
+      const isLongterm = (h) => isLongtermRel(h?.rel)
       if (getConfig().longtermAppend !== false && hits.length > 0 && !hits.some(isLongterm)) {
         const reserve = ranked.slice(limit).find(isLongterm)
         if (reserve) hits.push(reserve)
@@ -202,7 +211,7 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
       if (hits.length > 0) {
         out += hits.some(isLongterm)
           ? '\nLong-term topic blocks above are authoritative (never windowed) — correct outdated statements in their topic files in place, and merge topic files that clearly overlap.'
-          : '\nIf a fact above proved worth keeping long term, file it via the memory tool into memory/<topic>.md — update the matching topic file, or start a new one when none matches.'
+          : '\nIf a fact above proved worth keeping long term, file it via the memory tool into topics/<topic>.md — update the matching topic file, or start a new one when none matches.'
       }
       return out
     },
@@ -274,7 +283,7 @@ function memoryFileTool() {
   /** Long-term topic names currently on disk (empty when the dir is absent). */
   function listTopics() {
     try {
-      return readdirSync(join(memoryRoot(), 'memory'))
+      return readdirSync(join(memoryRoot(), 'topics'))
         .filter((n) => n.endsWith('.md'))
         .map((n) => n.slice(0, -3))
         .sort()
@@ -292,7 +301,7 @@ function memoryFileTool() {
     const topic = String(args?.topic ?? '').trim()
     if (!topic) return join(memoryRoot(), todayStamp(), `${sessionSlug(exec?.agent?.session?.header?.cwd)}.md`)
     if (!TOPIC_RE.test(topic)) throw new Error(`memory: invalid topic "${topic}" — letters, digits, "-" or "_" only`)
-    return join(memoryRoot(), 'memory', `${topic}.md`)
+    return join(memoryRoot(), 'topics', `${topic}.md`)
   }
 
   function doRead(file, sessionId, withTopics) {
@@ -304,7 +313,7 @@ function memoryFileTool() {
         const topics = listTopics()
         out += topics.length > 0
           ? `\nExisting long-term topics: ${topics.join(', ')} (target with topic:"<name>")`
-          : '\nLong-term topic files live under memory/<topic>.md (target with topic:"<name>")'
+          : '\nLong-term topic files live under topics/<topic>.md (target with topic:"<name>")'
       }
       return out
     }
@@ -366,14 +375,14 @@ function memoryFileTool() {
       "No arguments reads TODAY's note for this workspace and returns its full text (ABSENT when there is none yet). " +
       'mode:"write" creates or fully replaces a file with content (refused when the file exists but was not read this session, or changed since that read). ' +
       'mode:"edit" replaces a literal old_string with new_string (read the file first; old_string must appear exactly once unless replace_all). ' +
-      "The optional topic parameter targets the long-term library file memory/<topic>.md instead of today's note. " +
+      "The optional topic parameter targets the long-term library file topics/<topic>.md instead of today's note. " +
       'Read before modify, exactly like the native file tools. ' +
       'What to record: reusable experience only, never play-by-play — decisions and their reasons, pitfalls and fixes, reusable commands and processes, state changes; ' +
       'organize under # headings, merge related topics, keep each block concise, and correct outdated statements in place. ' +
       'Topic files hold cross-project evergreen experience (environment/tooling lessons, collaboration preferences, general patterns): one topic per file, update the matching file in place and merge near-duplicates instead of spawning parallel ones.',
     parameters: {
       mode: { type: 'string', description: '"read" (default), "write" or "edit"' },
-      topic: { type: 'string', description: 'Target the long-term topic file memory/<topic>.md instead of today\'s note (short kebab-case names, e.g. "windows-env")' },
+      topic: { type: 'string', description: 'Target the long-term topic file topics/<topic>.md instead of today\'s note (short kebab-case names, e.g. "windows-env")' },
       content: { type: 'string', description: 'Full note text for mode:"write"' },
       old_string: { type: 'string', description: 'Literal text to replace for mode:"edit"; must match exactly and appear once unless replace_all' },
       new_string: { type: 'string', description: 'Replacement text for mode:"edit" (an empty string deletes the match)' },

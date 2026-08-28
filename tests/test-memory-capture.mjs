@@ -5,7 +5,7 @@
 //      读后外部改动拒绝；原子写（无 .tmp 残留）；
 //   3) mode:"edit" 镜像原生 FS_NOT_OBSERVED/唯一匹配：未读拒绝、多处拒绝、
 //      replace_all 放行、找不到拒绝、ABSENT 观察后编辑拒绝（not found）；
-//   4) topic 参数：定位 memory/<topic>.md（可被检索索引）；非法 topic 拒绝；
+//   4) topic 参数：定位 topics/<topic>.md（可被检索索引）；非法 topic 拒绝；
 //   5) 无会话调用：读自由、写仅 create、edit 恒拒（镜像原生 owner 语义）；
 //      跨会话 CAS：A 读 → B 写 → A 编辑被拒；
 //   6) 每轮提醒 = systemPrompt.context 贡献（2026-08-29 恢复）：文案只讲时机
@@ -82,7 +82,7 @@ await check('不存在时：ABSENT + 建file指引 + 现有 topic 提示，零�
   assert.match(out, /^ABSENT /)
   assert.ok(out.includes(dailyFile('C:\\absent')), 'ABSENT 指今日文件绝对路径')
   assert.match(out, /mode:"write"/, '指引创建')
-  assert.match(out, /memory\/<topic>\.md/, '提及长期主题文件')
+  assert.match(out, /topics\/<topic>\.md/, '提及长期主题文件')
   assert.ok(!existsSync(dailyFile('C:\\absent')), 'read 绝不创建文件')
 })
 
@@ -206,18 +206,18 @@ await check('read 后外部直改再 edit：CAS 拒绝', async () => {
 })
 
 // --- topic 参数 ----------------------------------------------------------------
-await check('topic：定位 memory/<topic>.md 且可被检索索引', async () => {
+await check('topic：定位 topics/<topic>.md 且可被检索索引', async () => {
   const out = await memory.execute({ topic: 'windows-env', mode: 'write', content: '# Windows 环境\n\npnpm 双实例教训' }, makeExec('s14'))
   assert.match(out, /· created/)
-  const topicFile = join(memoryRoot(), 'memory', 'windows-env.md')
-  assert.ok(existsSync(topicFile), 'topic 文件落在 memory/ 下')
-  assert.ok(walkMemory(90).some((e) => e.rel === 'memory/windows-env.md'), '长期主题文件进检索语料')
+  const topicFile = join(memoryRoot(), 'topics', 'windows-env.md')
+  assert.ok(existsSync(topicFile), 'topic 文件落在 topics/ 下')
+  assert.ok(walkMemory(90).some((e) => e.rel === 'topics/windows-env.md'), '长期主题文件进检索语料')
 })
 
 await check('topic 读：不存在 → ABSENT（不带 topic 列表）', async () => {
   const out = await memory.execute({ topic: 'no-such-topic' }, makeExec('s15'))
   assert.match(out, /^ABSENT /)
-  assert.ok(out.includes(join(memoryRoot(), 'memory', 'no-such-topic.md')))
+  assert.ok(out.includes(join(memoryRoot(), 'topics', 'no-such-topic.md')))
   assert.ok(!out.includes('Existing long-term topics'), 'topic 定向读不附全局 topic 列表')
 })
 

@@ -2,28 +2,30 @@
 //
 // Layout (GLOBAL — one shared library for every workspace; user decision
 // 2026-08-18: the whole plugin data root IS the memory root):
-//   $DSH_HOME/dsh-memory/YYYY-MM-DD/<workspace-slug>.md
-//                                                     one daily file per
-//                                                     workspace; topics are
-//                                                     `#` first-level headings
-//   $DSH_HOME/dsh-memory/memory/<topic>.md            LONG-TERM memory: free
-//                                                     topic files, one topic
-//                                                     per file (user decision
-//                                                     2026-08-28, replacing
-//                                                     the never-shipped
-//                                                     single memory.md).
-//                                                     The dir name is not a
-//                                                     date, so it is exempt
-//                                                     from both the recency
-//                                                     decay and the daily
-//                                                     hard window —
-//                                                     walkMemory indexes any
-//                                                     subdirectory, so this
-//                                                     layer needs zero extra
-//                                                     code.
+//   <memory root>/YYYY-MM-DD/<workspace-slug>.md    one daily file per
+//                                                   workspace; topics are
+//                                                   `#` first-level headings
+//   <memory root>/topics/<topic>.md                 LONG-TERM memory: free
+//                                                   topic files, one topic
+//                                                   per file (2026-08-29,
+//                                                   renamed from memory/ now
+//                                                   that the root itself is
+//                                                   the memory library —
+//                                                   "memory inside memory"
+//                                                   was redundant). Any
+//                                                   non-date directory stays
+//                                                   indexed, so pre-rename
+//                                                   memory/ files keep
+//                                                   showing up in search.
 //
-// The directory is named `dsh-memory` (not `memory`) on purpose: if the
-// harness ever ships its own memory feature it will likely use `memory`.
+// Root resolution (2026-08-29, cross-agent sharing): AGENT_MEMORY_HOME wins
+// when set — the SAME environment variable the agent-memory skill
+// (skill/agent-memory) uses, so dsh and other agents converge on one library.
+// Fallback is the plugin data root $DSH_HOME/dsh-memory, which keeps every
+// pre-env deployment (and the dev environment, where sync-dev.ps1 pins the
+// var inline) exactly where it was. Changing the variable needs a dsh
+// restart: the path is resolved per call but a running process keeps the env
+// it was launched with.
 //
 // Write path (2026-08-28, user decision — see index.js header): the
 // three-mode `memory` tool does all file work itself via node:fs (trusted
@@ -41,10 +43,15 @@ export function pluginRoot() {
   return join(dshHomePath(), 'dsh-memory')
 }
 
-/** Memory root: $DSH_HOME/dsh-memory — the memory files live DIRECTLY under
- * the plugin data root. */
+/**
+ * Memory root: the shared cross-agent library. AGENT_MEMORY_HOME (the same
+ * variable the agent-memory skill resolves) wins when set; otherwise the
+ * plugin data root — identical to the pre-env behavior, so a missing
+ * variable can never split the library.
+ */
 export function memoryRoot() {
-  return pluginRoot()
+  const shared = String(process.env.AGENT_MEMORY_HOME ?? '').trim()
+  return shared || pluginRoot()
 }
 
 /** Local date stamp YYYY-MM-DD. */
@@ -85,11 +92,11 @@ export function readMemoryFile(file, maxBytes = 2 * 1024 * 1024) {
  *     OLDER than the window are skipped (hard window, user decision
  *     2026-08-24: too-old diaries leave the searchable corpus but stay on
  *     disk). The window applies ONLY to parseable dates.
- *   - any other subdirectory (in practice `memory/<topic>.md`, the long-term
+ *   - any other subdirectory (in practice `topics/<topic>.md`, the long-term
  *     topic files): never windowed; their unparseable "date" also makes
  *     recencyWeight return 1 — no decay, always reachable.
  * rel paths use forward slashes relative to memoryRoot()
- * (YYYY-MM-DD/<topic>.md or memory/<topic>.md).
+ * (YYYY-MM-DD/<topic>.md or topics/<topic>.md).
  * @param {number} [windowDays=0] - hard window for dated notes in days; 0 disables it
  * @returns {Array<{rel: string, date: string, kind: 'note', text: string}>}
  */

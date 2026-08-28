@@ -1,20 +1,22 @@
 // dsh-memory — storage vocabulary (global under $DSH_HOME, zero deps).
 //
 // Layout (GLOBAL — one shared library for every workspace; user decision
-// 2026-08-18: the whole plugin data root IS the memory root — the `memory/`
-// sublevel and the digest/dream layers were removed):
+// 2026-08-18: the whole plugin data root IS the memory root):
 //   $DSH_HOME/dsh-memory/YYYY-MM-DD/<workspace-slug>.md
 //                                                     one daily file per
 //                                                     workspace; topics are
 //                                                     `#` first-level headings
-//   $DSH_HOME/dsh-memory/memory/memory.md             LONG-TERM memory: ONE
-//                                                     file organized by topic
-//                                                     headings (user decision
-//                                                     2026-08-24). The dir name
-//                                                     is not a date, so it is
-//                                                     exempt from both the
-//                                                     recency decay and the
-//                                                     daily hard window —
+//   $DSH_HOME/dsh-memory/memory/<topic>.md            LONG-TERM memory: free
+//                                                     topic files, one topic
+//                                                     per file (user decision
+//                                                     2026-08-28, replacing
+//                                                     the never-shipped
+//                                                     single memory.md).
+//                                                     The dir name is not a
+//                                                     date, so it is exempt
+//                                                     from both the recency
+//                                                     decay and the daily
+//                                                     hard window —
 //                                                     walkMemory indexes any
 //                                                     subdirectory, so this
 //                                                     layer needs zero extra
@@ -23,16 +25,12 @@
 // The directory is named `dsh-memory` (not `memory`) on purpose: if the
 // harness ever ships its own memory feature it will likely use `memory`.
 //
-// Write path (2026-08-23, user decision — see index.js header): the `memory`
-// tool is a path locator — it returns today's memory file (creating it with
-// the provenance comment when absent, merging the calling session into the
-// comment when present) by dispatching the host's NATIVE read/write tools.
-// The model then maintains the note with its own native read/edit/write
-// tools. No host hooks (tools/result etc.) are registered; provenance is
-// maintained exclusively inside the memory tool. This file keeps only:
-// path/slug/date derivation, the provenance-comment merge (preamble split +
-// session-id merge, exported as mergeProvenance), the raw text read used to
-// construct the merge input, and the walk used by memory_search.
+// Write path (2026-08-28, user decision — see index.js header): the
+// three-mode `memory` tool does all file work itself via node:fs (trusted
+// plugin data-root writes, native-shaped observation guard). The session
+// provenance comment was removed with the 2026-08-23 locator design it
+// belonged to, so this file keeps only path/slug/date derivation and the
+// walk used by memory_search — no write helpers, no comment merging.
 
 import { existsSync, readdirSync, statSync, readFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
@@ -44,7 +42,7 @@ export function pluginRoot() {
 }
 
 /** Memory root: $DSH_HOME/dsh-memory — the memory files live DIRECTLY under
- * the plugin data root (the `memory/` sublevel was removed 2026-08-18). */
+ * the plugin data root. */
 export function memoryRoot() {
   return pluginRoot()
 }
@@ -60,59 +58,16 @@ export function todayStamp(now = new Date()) {
 /**
  * Workspace slug for a session cwd, matching the $DSH_HOME/sessions/<slug>/
  * layout (`--D-Project-dsh-bundle-dsh-memory--`). Sessions without a cwd
- * share the `--general--` file.
+ * share the `--general--` file. Both slash spellings normalize to the same
+ * slug, so a cwd arriving as `D:\Project\x` (Win32) and `D:/Project/x`
+ * (Git Bash) resolves to one and the same daily file.
  * @param {string|undefined} cwd - session working directory
  * @returns {string}
  */
 export function sessionSlug(cwd) {
   const raw = String(cwd ?? '').trim()
   if (!raw) return '--general--'
-  return `--${raw.replace(':', '').replaceAll('\\', '-')}--`
-}
-
-/**
- * Split the leading preamble (everything before the first `# ` heading line —
- * in practice the provenance comment) off a memory file's text.
- * @param {string} text
- * @returns {{preamble: string, body: string}}
- */
-export function splitPreamble(text) {
-  const lines = String(text ?? '').split('\n')
-  let cut = 0
-  while (cut < lines.length && !/^#\s/.test(lines[cut])) cut += 1
-  return { preamble: lines.slice(0, cut).join('\n').trim(), body: lines.slice(cut).join('\n') }
-}
-
-const SOURCE_COMMENT = /^<!--\s*会话来源:\s*(.*?)\s*-->$/
-
-/**
- * Merge one session id into the leading provenance comment(s): existing
- * `<!-- 会话来源: ... -->` lines are collapsed into ONE comment carrying all
- * ids in first-seen order (new id appended when missing); any other preamble
- * lines survive above it.
- * @param {string} preamble - current preamble text ('' when none)
- * @param {string} sessionId
- * @returns {string}
- */
-export function mergeSourceComment(preamble, sessionId) {
-  const id = String(sessionId ?? '').trim()
-  const rest = []
-  const ids = []
-  for (const line of String(preamble ?? '').split('\n')) {
-    const m = SOURCE_COMMENT.exec(line.trim())
-    if (!m) {
-      if (line.trim()) rest.push(line.trim())
-      continue
-    }
-    for (const part of m[1].split(',')) {
-      const known = part.trim()
-      if (known && !ids.includes(known)) ids.push(known)
-    }
-  }
-  if (id && !ids.includes(id)) ids.push(id)
-  if (ids.length === 0) return rest.join('\n')
-  const comment = `<!-- 会话来源: ${ids.join(', ')} -->`
-  return rest.length > 0 ? `${rest.join('\n')}\n${comment}` : comment
+  return `--${raw.replace(':', '').replaceAll('\\', '-').replaceAll('/', '-')}--`
 }
 
 /** Read a memory file as text; null when absent; '' when over `maxBytes`. */
@@ -124,40 +79,17 @@ export function readMemoryFile(file, maxBytes = 2 * 1024 * 1024) {
 }
 
 /**
- * Merge one session id into a memory file's text: the leading provenance
- * comment(s) are collapsed into ONE `<!-- 会话来源: ... -->` line carrying
- * all ids in first-seen order (the new id appended when missing); any other
- * preamble lines survive above it. Exactly idempotent: when the comment
- * already carries the id (or there is no id to add), the text comes back
- * unchanged with `changed: false`, so a caller never rewrites on formatting
- * differences. The model never touches this — it is maintained exclusively
- * by the `memory` tool (2026-08-23, user decision).
- * @param {string} text - current file text ('' for an absent file)
- * @param {string|undefined} sessionId
- * @returns {{text: string, changed: boolean}}
- */
-export function mergeProvenance(text, sessionId) {
-  const split = splitPreamble(text)
-  const merged = sessionId ? mergeSourceComment(split.preamble, sessionId) : split.preamble
-  if (merged === split.preamble) {
-    return { text: String(text ?? ''), changed: false }
-  }
-  const body = split.body.trim()
-  return { text: body ? `${merged}\n\n${body}` : merged, changed: true }
-}
-
-/**
  * Walk every markdown file under the memory root. Two layers:
  *   - dated subdirectories (YYYY-MM-DD/<topic>.md): the ephemeral daily
  *     layer — when `windowDays` > 0, directories whose name parses as a date
  *     OLDER than the window are skipped (hard window, user decision
  *     2026-08-24: too-old diaries leave the searchable corpus but stay on
  *     disk). The window applies ONLY to parseable dates.
- *   - any other subdirectory (in practice `memory/memory.md`, the long-term
- *     file): never windowed; its unparseable "date" also makes recencyWeight
- *     return 1 — no decay, always reachable.
+ *   - any other subdirectory (in practice `memory/<topic>.md`, the long-term
+ *     topic files): never windowed; their unparseable "date" also makes
+ *     recencyWeight return 1 — no decay, always reachable.
  * rel paths use forward slashes relative to memoryRoot()
- * (YYYY-MM-DD/<topic>.md or memory/memory.md).
+ * (YYYY-MM-DD/<topic>.md or memory/<topic>.md).
  * @param {number} [windowDays=0] - hard window for dated notes in days; 0 disables it
  * @returns {Array<{rel: string, date: string, kind: 'note', text: string}>}
  */

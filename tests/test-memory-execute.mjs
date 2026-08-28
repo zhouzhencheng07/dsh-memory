@@ -1,9 +1,9 @@
 // End-to-end checks for memory_search's execute() across the two-layer
-// corpus (2026-08-25 revision): single `keywords` parameter + trim notices +
-// the hard daily window + MIN_SCORE filtering + ONE unconditional success
-// hint + the CONFIGURABLE ADDITIVE long-term append seat. Boots src/index.js
-// against the @deepseek-ai/* stubs, points $MEM_TEST_HOME at a temp sandbox
-// seeded with layered notes, and drives the tool directly.
+// corpus (2026-08-28 revision): single `keywords` parameter + trim notices +
+// the hard daily window + MIN_SCORE filtering + PURE RETRIEVAL (the old
+// success hint is gone) + the CONFIGURABLE ADDITIVE long-term append seat.
+// Boots src/index.js against the @deepseek-ai/* stubs, points $MEM_TEST_HOME
+// at a temp sandbox seeded with layered notes, and drives the tool directly.
 // Usage: node --import ./tests/register-mem-test.mjs tests/test-memory-execute.mjs
 import { strict as assert } from 'node:assert'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
@@ -58,8 +58,7 @@ const rootPrefix = process.env.MEM_TEST_HOME.replaceAll('\\', '/') + '/dsh-memor
 const out1 = await search.execute({ keywords: 'alphaunique' })
 assert.match(out1, /今日流水/)
 assert.ok(out1.includes(`${rootPrefix}${dayStamp(0)}/note.md#`), `hits must carry ABSOLUTE file paths, got:\n${out1}`)
-assert.match(out1, /Note: add factual information referenced above/, 'ANY non-empty result carries the long-term hint')
-assert.ok(out1.includes(`${rootPrefix}memory/memory.md (read before edit)`), 'the hint names the ABSOLUTE long-term path')
+assert.ok(!out1.includes('Note:'), 'pure retrieval: no success hint (2026-08-28)')
 
 const outCap = await search.execute({ keywords: 'alphaunique extra1 extra2 extra3 extra4 extra5 extra6 extra7 extra8' })
 assert.match(outCap, /^keywords capped to 7 \(dropped: extra7, extra8\)/)
@@ -69,11 +68,9 @@ await assert.rejects(() => search.execute({ keywords: '   ' }), /no usable keywo
 // --- hard daily window (default 90) -------------------------------------------
 const outOld = await search.execute({ keywords: 'gammaunique' })
 assert.match(outOld, /^No memory found\.$/, '200-day-old diary is outside the 90-day window')
-assert.ok(!outOld.includes('Note:'), 'empty results carry no hint')
 
 const outMid = await search.execute({ keywords: 'betaunique' })
 assert.match(outMid, /十天前/, '10-day-old diary stays inside the window')
-assert.match(outMid, /fix outdated statements there/, 'the success hint covers correcting stale long-term blocks')
 
 // --- long-term participation: first place is already long-term ------------------
 const outLong = await search.execute({ keywords: 'deltaunique' })
@@ -111,7 +108,6 @@ assert.match(outAppend, /近水楼台/, 'best diary keeps slot 1')
 assert.match(outAppend, /昨日流水/, 'second diary KEEPS slot 2 (additive, not evicting)')
 assert.match(outAppend, /追加测试/, 'best-ranking long-term block appended after the regular results')
 assert.equal(rowCount(outAppend), 3)
-assert.match(outAppend, /Note: add factual information referenced above/, 'appended hit still ends with the hint')
 
 // off switch: pure top-N
 const searchOff = boot({ searchLimit: 2, longtermAppend: false })
@@ -128,5 +124,5 @@ assert.match(outSolo, /近水楼台/, 'limit 1 keeps the top diary')
 assert.match(outSolo, /追加测试/, 'limit 1 gains the appended long-term block')
 assert.equal(rowCount(outSolo), 2)
 
-console.log('execute-layer checks passed (params, notices, window, MIN_SCORE, unconditional hint, store filtering, additive long-term seat)')
+console.log('execute-layer checks passed (params, notices, window, MIN_SCORE, pure retrieval, store filtering, additive long-term seat)')
 rmSync(home, { recursive: true, force: true })

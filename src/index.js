@@ -1,68 +1,72 @@
 // dsh-memory plugin for DeepSeek Harness (dsh)
 //
 // Cross-session memory: daily per-workspace notes under
-// $DSH_HOME/dsh-memory/YYYY-MM-DD/, the long-term memory/memory.md, and
-// memory search.
+// $DSH_HOME/dsh-memory/YYYY-MM-DD/, long-term topic files under
+// $DSH_HOME/dsh-memory/memory/, and memory search.
 //
-// Design (agreed with the user, 2026-08-16/17/18/22/25):
+// Design (agreed with the user, 2026-08-16..28):
 //   - memory = reusable experience reference (decisions, pitfalls, ideas),
-//     NOT a project archive; project detail lives in the workspace docs.
-//   - retrieval: memory_search over the daily notes (block-level;
-//     POSITIONAL keyword scoring 2026-08-25 — ONE `keywords` parameter of up
-//     to 7 terms, first 3 ×3 then next 4 ×1, partial credit per matched
-//     keyword, no hard AND gate, MIN_SCORE floor — plus optional vector,
-//     recency-weighted). Long-term etiquette 2026-08-25: whenever results
-//     came back, ONE unconditional hint points lasting-fact writes at
-//     memory/memory.md; and when no long-term block made the cut, the best
-//     ranking one from the candidate pool is APPENDED after the regular
-//     results (config `longtermAppend`, additive — never evicts). The
-//     digest/dream layer was REMOVED
-//     (2026-08-18, user decision): memory notes are edited in place and carry
-//     their date in the rel, so recency guidance ("newer notes win conflicts,
-//     older notes still hold details") plus a recency decay in ranking covers
-//     the old digest's convergence job; the digest/ and dream/ directories
-//     were deleted, the memory/ sublevel was merged into the plugin root.
-//   - capture (2026-08-23, user decision, final revision): NO host hooks and
-//     NO end-of-turn reminder hook. Two layers only:
-//       a) a per-turn system-prompt reminder (context contribution
-//          `dsh-memory:auto`, order 200, gated on config `autoMemory`,
-//          subagents excluded): its text is deliberately SHORT — "when this
-//          turn produced something worth keeping across sessions, you MUST
-//          use the memory tool" — the timing detail, the content rules, and
-//          the usage (native read/write/edit) all live in the `memory` tool
-//          description, which rides the tool schema on every request.
-//          `autoMemory: false` removes the reminder: the tool stays usable
-//          (neutral description, no "must" wording) for users who prefer to
-//          record rarely or only when asked.
-//       b) ONE path-locating tool `memory`: no arguments; returns TODAY's
-//          memory file for the calling workspace. When the file is absent it
-//          is CREATED (content = the provenance comment) and when present
-//          the calling session id is merged into the leading
-//          `<!-- 会话来源: ... -->` comment (exactly idempotent). All file
-//          work dispatches the host's NATIVE read/write through
-//          `ctx.tools.execute()`, so every dsh mechanism applies honestly:
-//          the fs observation policy (read-before-modify) gates the merge
-//          write exactly as for the native tools, and the sandbox fence
-//          applies honestly: memory capture needs danger-full-access, like
-//          any native $DSH_HOME write. After the tool returns the path, the
-//          agent maintains the note with its own native read/edit/write
-//          tools — provenance is NOT re-merged afterwards (a session that
-//          knows the path has already called the tool, so its id is already
-//          in the comment; no hook needed, user decision).
+//     NOT a project archive. Capture etiquette and timing are NOT enforced by
+//     the plugin (2026-08-28, user decision): the per-turn reminder and its
+//     `autoMemory` config were REMOVED — the rules live in the user's global
+//     AGENTS.md, and both tools below are pure mechanism with neutral
+//     descriptions.
+//   - retrieval: memory_search over the corpus (block-level; POSITIONAL
+//     keyword scoring 2026-08-25 — ONE `keywords` parameter of up to 7
+//     terms, first 3 ×3 then next 4 ×1, partial credit per matched keyword,
+//     no hard AND gate, MIN_SCORE floor — plus optional vector,
+//     recency-weighted). Pure retrieval since 2026-08-28: the old success
+//     hint pointing at the long-term file is gone. Long-term append seat
+//     (2026-08-25): when no long-term block made the cut, the best-ranking
+//     one from the candidate pool is APPENDED after the regular results
+//     (config `longtermAppend`, additive — never evicts).
+//   - long-term layer = FREE TOPIC FILES (2026-08-28, user decision):
+//     memory/<topic>.md, one file per topic. walkMemory already indexes any
+//     non-date subdirectory (never windowed, never decayed), so this needed
+//     zero search changes. The earlier single memory/memory.md design
+//     (2026-08-24) never shipped — the file was never created, so there is
+//     nothing to migrate. Durable project-specific facts have no layer by
+//     design: they graduate into the user's AGENTS.md or die in the 90-day
+//     diary window (accepted trade-off, forces curation).
+//   - the `memory` tool (2026-08-28, user decision — replaces the 2026-08-23
+//     path locator): a THREE-MODE file tool mirroring the native read/write/
+//     edit contract. No arguments reads TODAY's note (ABSENT output lists
+//     existing topics); mode:"write" creates or fully replaces; mode:"edit"
+//     replaces a unique literal old_string; an optional `topic` parameter
+//     targets memory/<topic>.md. The observation guard mirrors
+//     @deepseek-ai/dsh-fs-observation-policy semantics (per-session
+//     present/absent + version records; write refused on exists-unread and
+//     stale-version; edit refused when unread; unique-match enforcement).
+//   - WHY the tool writes via plain node:fs instead of dispatching the
+//     native tools (2026-08-28, user decision): the sandbox fence lives
+//     INSIDE the fs backend (@deepseek-ai/dsh-fs-sandbox checkedTarget —
+//     even a direct ctx.fs.writeText falls back to ctx.sandboxPolicy
+//     .resolve()), so native-pipeline writes to $DSH_HOME are refused under
+//     workspace-write, and the only legitimate wider path is the tool
+//     layer's one-shot escalation which requires per-write user approval —
+//     unusable for automatic capture. A plugin writing its OWN data root is
+//     trusted host behavior (same class as settings.yaml persistence); the
+//     sandbox protects MODEL-controlled paths, and here the model only
+//     supplies content while paths are derived (today's note) or whitelisted
+//     (topic regex, containment under memoryRoot()). Capture now works in
+//     every permission mode. Session provenance comments were REMOVED with
+//     the locator (2026-08-28): they existed for a conversation-replay tool
+//     that was judged not worth building (daily notes suffice; replaying
+//     whole sessions wastes context).
 //   - config: `dsh-memory:` section in $DSH_HOME/settings.yaml, hot-reloaded
-//     (searchLimit / embeddingBaseUrl / embeddingModel / autoMemory), see
-//     README.
+//     (searchLimit / dailyWindowDays / embeddingBaseUrl / embeddingModel /
+//     longtermAppend), see README.
 //
 // Plain ESM JavaScript on purpose. `@deepseek-ai/*` resolves at runtime
 // through Node's parent-walk (the harness installs them in the profile
 // fallback node_modules).
 
 import { join } from 'node:path'
+import { mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import z from '@deepseek-ai/schemastery'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { CallId } from '@deepseek-ai/dsh-llm'
-import { memoryRoot, mergeProvenance, readMemoryFile, sessionSlug, todayStamp, walkMemory } from './store.js'
+import { memoryRoot, sessionSlug, todayStamp, walkMemory } from './store.js'
 import { formatHits, fuseHits, parseKeywords, searchMemory } from './search.js'
 import { EmbeddingClient, VectorIndex } from './embed.js'
 
@@ -87,16 +91,13 @@ export const Config = z.object({
   searchLimit: z.natural().min(1).max(10).default(5),
   /** Hard window in days for the DAILY notes (user decision 2026-08-24):
    * dated notes older than this leave the searchable corpus (files stay on
-   * disk). 0 disables the window. The long-term memory/memory.md is never
-   * windowed and never decays. */
+   * disk). 0 disables the window. Long-term topic files (memory/) are never
+   * windowed and never decay. */
   dailyWindowDays: z.natural().default(90),
   /** Ollama base URL for optional vector search (e.g. http://localhost:11434); empty disables it. */
   embeddingBaseUrl: z.string(),
   /** Embedding model served by embeddingBaseUrl. */
   embeddingModel: z.string().default('bge-m3'),
-  /** Per-turn system-prompt reminder ("use the memory tool when something is
-   * worth keeping"); off = no reminder, the neutral memory tool remains. */
-  autoMemory: z.boolean().default(true),
   /** Long-term append seat (2026-08-25): when no memory/ block made the
    * results, the best-ranking one from the candidate pool is APPENDED after
    * them (never evicting a regular result). Off = pure top-N. */
@@ -105,12 +106,17 @@ export const Config = z.object({
 
 const MAX_LIMIT = 10
 
-/** Long-term memory file (single, topic-heading organized — user decision
- * 2026-08-24). Lives under its own non-date subdirectory: never windowed,
- * never decayed. Created by the AGENT on first promotion (native write) —
- * the `memory` tool stays a single-path daily locator by design. */
-const LONGTERM_REL = 'memory/memory.md'
+/** Long-term topic directory prefix (rel paths like `memory/<topic>.md`). */
 const LONGTERM_DIR_PREFIX = 'memory/'
+
+/** Write cap: memory files are small curated notes; refuse runaway content. */
+const MAX_WRITE_BYTES = 1024 * 1024
+/** Read display cap, mirroring store.readMemoryFile's indexing cap. */
+const MAX_READ_BYTES = 2 * 1024 * 1024
+/** Guard bookkeeping cap: beyond this many sessions, drop the oldest
+ * session's observation records (plugin code cannot weakly observe session
+ * disposal, so the map needs an explicit bound). */
+const MAX_TRACKED_SESSIONS = 256
 
 function memorySearchTool(ctx, getConfig, getVectorIndex) {
   return {
@@ -164,97 +170,197 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
         const reserve = ranked.slice(limit).find(isLongterm)
         if (reserve) hits.push(reserve)
       }
+      // rows carry ABSOLUTE file paths — the agent cannot be assumed to know
+      // $DSH_HOME/dsh-memory, so hits must be directly usable with the
+      // memory tool's topic targeting or its read output
+      let out = formatHits(hits, memoryRoot())
       // tell the calling model when its input was trimmed, so the next call
-      // respects the cap (keywords ≤ 7); rows carry ABSOLUTE file paths —
-      // the agent cannot be assumed to know $DSH_HOME/dsh-memory, so both
-      // the hits and the long-term target below must be directly usable
-      // with its native read/edit tools
-      const rootDir = memoryRoot()
-      let out = formatHits(hits, rootDir)
+      // respects the cap (keywords ≤ 7)
       if (kw.notices.length > 0) out = `${kw.notices.join('; ')}\n${out}`
-      // One unconditional success hint (2026-08-25, simplifies the 2026-08-24
-      // composition-based branches): ANY non-empty result ends with the same
-      // pointer to the long-term file — record lasting facts there, fix stale
-      // ones. No results → no hint. The path is ABSOLUTE: a bare
-      // `memory/memory.md` would not resolve for the calling model.
-      if (hits.length > 0) {
-        const ltAbs = `${String(rootDir).replaceAll('\\', '/').replace(/\/+$/, '')}/memory/memory.md`
-        out += `\nNote: add factual information referenced above that will be reused long term to the matching topic heading in ${ltAbs} (read before edit); fix outdated statements there.`
-      }
       return out
     },
   }
 }
 
 /**
- * The path-locating `memory` tool (2026-08-23, user decision): NO arguments —
- * it returns the calling workspace's TODAY memory file. When the file is
- * absent it is CREATED (content = the provenance comment); when present the
- * calling session id is merged into the leading `<!-- 会话来源: ... -->`
- * comment (exactly idempotent — no write when the id is already there). All
- * file work dispatches the host's NATIVE read/write through
- * `ctx.tools.execute()`: the probe read records the observation so the merge
- * write passes the version guard (replaceIfVersion on an existing file,
- * createIfAbsent on a new one), and the sandbox fence applies honestly. The
- * agent then maintains the note with its own native read/edit/write tools;
- * provenance is NOT re-merged afterwards — a session that knows the path has
- * already called this tool, so its id is already in the comment.
+ * The three-mode `memory` file tool (2026-08-28, user decision): a
+ * native-read/write/edit-shaped mechanism confined to this plugin's data
+ * root. See the module header for why it writes via node:fs directly
+ * instead of dispatching the native tools.
+ *
+ * Observation guard, mirroring @deepseek-ai/dsh-fs-observation-policy:
+ * per-session records of present {mtimeMs, size} / absent per file. Write on
+ * an existing-but-unread file is refused (createIfAbsent semantics); write
+ * and edit on a stale observation are refused (CAS — "read it again"); edit
+ * without a prior read is refused (FS_NOT_OBSERVED); old_string must match
+ * exactly once unless replace_all (FS_AMBIGUOUS_EDIT). A call with no
+ * session owner reads freely but, like the native policy, cannot satisfy
+ * the prior-observation requirement: write proceeds only as create, edit is
+ * always refused.
  */
-function memoryLocatorTool(ctx) {
-  let subSeq = 0
+function memoryFileTool() {
+  /** sessionId -> Map(file -> {kind:'present', mtimeMs, size} | {kind:'absent'}) */
+  const observed = new Map()
 
-  /** Dispatch one native tool call through the real registry pipeline. */
-  async function dispatch(name, arguments_, exec) {
-    const input = {
-      callId: CallId(`${String(exec.callId)}:memory:${++subSeq}`),
-      rootCallId: exec.rootCallId,
-      name,
-      arguments: arguments_,
-      ...(exec.agent ? { agent: exec.agent } : {}),
-      parent: exec.token,
-      signal: exec.signal,
-    }
-    const result = await ctx.tools.execute(input)
-    if (result.isError) {
-      const message = result.error?.message ?? String(result.error ?? 'unknown error')
-      throw new Error(`memory: ${message}`)
-    }
-    return result.value
+  function owner(exec) {
+    return exec?.agent?.session?.id ?? null
   }
 
-  /** Today's memory file for the calling session. */
-  function dailyFile(exec) {
-    return join(memoryRoot(), todayStamp(), `${sessionSlug(exec?.agent?.session?.header?.cwd)}.md`)
+  function record(sessionId, file, kind) {
+    if (!sessionId) return
+    let byFile = observed.get(sessionId)
+    if (!byFile) {
+      if (observed.size >= MAX_TRACKED_SESSIONS) {
+        observed.delete(observed.keys().next().value)
+      }
+      byFile = new Map()
+      observed.set(sessionId, byFile)
+    }
+    byFile.set(file, kind === 'absent' ? { kind } : { kind, ...statInfo(file) })
+  }
+
+  function prior(sessionId, file) {
+    return sessionId ? observed.get(sessionId)?.get(file) : undefined
+  }
+
+  /** Current stat summary; null when the file is absent. */
+  function statInfo(file) {
+    const info = statSync(file, { throwIfNoEntry: false })
+    return info ? { mtimeMs: info.mtimeMs, size: info.size } : null
+  }
+
+  const STALE = (file) => `memory: "${file}" changed since it was read — read it again (no-arg memory or mode:"read")`
+
+  /** Content changed under an unchanged size within one mtime tick is not
+   * worth a hash: memory notes grow when edited, so size catches the
+   * realistic races; the CAS exists to force a re-read, not to be a lock. */
+
+  /** Publish atomically: same-directory temp file + rename, so a crash or
+   * concurrent reader never observes a half-written note. */
+  function atomicWrite(file, content) {
+    mkdirSync(join(file, '..'), { recursive: true })
+    const tmp = `${file}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    writeFileSync(tmp, content, 'utf8')
+    renameSync(tmp, file)
+  }
+
+  /** Long-term topic names currently on disk (empty when the dir is absent). */
+  function listTopics() {
+    try {
+      return readdirSync(join(memoryRoot(), 'memory'))
+        .filter((n) => n.endsWith('.md'))
+        .map((n) => n.slice(0, -3))
+        .sort()
+    } catch {
+      return []
+    }
+  }
+
+  const TOPIC_RE = /^[\p{L}\p{N}_-]+$/u
+
+  /** Today's note by default; `topic` targets the long-term library file.
+   * The regex plus the join keep every reachable path strictly inside
+   * memoryRoot() — the model only ever supplies a single safe segment. */
+  function resolveTarget(args, exec) {
+    const topic = String(args?.topic ?? '').trim()
+    if (!topic) return join(memoryRoot(), todayStamp(), `${sessionSlug(exec?.agent?.session?.header?.cwd)}.md`)
+    if (!TOPIC_RE.test(topic)) throw new Error(`memory: invalid topic "${topic}" — letters, digits, "-" or "_" only`)
+    return join(memoryRoot(), 'memory', `${topic}.md`)
+  }
+
+  function doRead(file, sessionId, withTopics) {
+    const info = statInfo(file)
+    if (!info) {
+      record(sessionId, file, 'absent')
+      let out = `ABSENT ${file} — create it with memory {mode:"write", content:"<full note text>"}`
+      if (withTopics) {
+        const topics = listTopics()
+        out += topics.length > 0
+          ? `\nExisting long-term topics: ${topics.join(', ')} (target with topic:"<name>")`
+          : '\nLong-term topic files live under memory/<topic>.md (target with topic:"<name>")'
+      }
+      return out
+    }
+    if (info.size > MAX_READ_BYTES) {
+      record(sessionId, file, 'present')
+      return `${file} · too large to display (${info.size} bytes) — trim it down before further edits`
+    }
+    const text = readFileSync(file, 'utf8')
+    record(sessionId, file, 'present')
+    return `${file}\n\n${text}\n\n— maintain with memory {mode:"edit", old_string, new_string} or {mode:"write", content} (full replace)`
+  }
+
+  function doWrite(file, content, sessionId) {
+    const bytes = Buffer.byteLength(content, 'utf8')
+    if (bytes > MAX_WRITE_BYTES) throw new Error(`memory: content is ${bytes} bytes — the ${MAX_WRITE_BYTES}-byte cap keeps notes curated; split the content across topic files`)
+    const current = statInfo(file)
+    const seen = prior(sessionId, file)
+    if (current) {
+      if (!seen || seen.kind === 'absent') {
+        throw new Error(`memory: "${file}" ${seen ? 'appeared since it was read as absent' : 'already exists'} — read it first (no-arg memory or mode:"read")`)
+      }
+      if (seen.mtimeMs !== current.mtimeMs || seen.size !== current.size) throw new Error(STALE(file))
+    }
+    atomicWrite(file, content)
+    record(sessionId, file, 'present')
+    return `${file} · ${current ? 'replaced' : 'created'} (${bytes} bytes)`
+  }
+
+  function doEdit(file, args, sessionId) {
+    if (typeof args?.old_string !== 'string' || args.old_string.length === 0) {
+      throw new Error('memory: mode:"edit" requires a non-empty old_string (new_string defaults to "")')
+    }
+    const newValue = args?.new_string == null ? '' : String(args.new_string)
+    const current = statInfo(file)
+    const seen = prior(sessionId, file)
+    if (!current) {
+      throw new Error(`memory: cannot edit "${file}": ${seen ? 'not found' : 'edit requires reading it first (no-arg memory or mode:"read")'}`)
+    }
+    if (!seen || seen.kind === 'absent') {
+      throw new Error(`memory: "${file}" ${seen ? 'appeared since it was read as absent' : 'was never read this session'} — read it before editing`)
+    }
+    if (seen.mtimeMs !== current.mtimeMs || seen.size !== current.size) throw new Error(STALE(file))
+    const text = readFileSync(file, 'utf8')
+    const count = text.split(args.old_string).length - 1
+    if (count === 0) throw new Error(`memory: old_string not found in "${file}" — copy it exactly from the read output`)
+    const replaceAll = args?.replace_all === true
+    if (count > 1 && !replaceAll) {
+      throw new Error(`memory: ${count} occurrences of old_string in "${file}" — it must be unique, or pass replace_all:true`)
+    }
+    atomicWrite(file, replaceAll ? text.replaceAll(args.old_string, newValue) : text.replace(args.old_string, newValue))
+    record(sessionId, file, 'present')
+    return `${file} · edited (${count} occurrence${count === 1 ? '' : 's'} replaced)`
   }
 
   return {
     name: 'memory',
     description:
-      "Returns today's cross-session memory note path for this workspace, creating it with a session-source comment when missing. " +
-      'Maintain the note with the native read/write/edit tools (read before modify): record only experience worth reusing across sessions — decisions and reasons, preferences, pitfalls and fixes, reusable commands; organize under # headings, keep each block concise and split long content under deeper headings, merge related topics, and correct outdated statements in place.',
-    parameters: {},
+      "Read and maintain this plugin's memory files under $DSH_HOME/dsh-memory. " +
+      "No arguments reads TODAY's note for this workspace and returns its full text (ABSENT when there is none yet). " +
+      'mode:"write" creates or fully replaces a file with content (refused when the file exists but was not read this session, or changed since that read). ' +
+      'mode:"edit" replaces a literal old_string with new_string (read the file first; old_string must appear exactly once unless replace_all). ' +
+      "The optional topic parameter targets the long-term library file memory/<topic>.md instead of today's note. " +
+      'Read before modify, exactly like the native file tools.',
+    parameters: {
+      mode: { type: 'string', description: '"read" (default), "write" or "edit"' },
+      topic: { type: 'string', description: 'Target the long-term topic file memory/<topic>.md instead of today\'s note (short kebab-case names, e.g. "windows-env")' },
+      content: { type: 'string', description: 'Full note text for mode:"write"' },
+      old_string: { type: 'string', description: 'Literal text to replace for mode:"edit"; must match exactly and appear once unless replace_all' },
+      new_string: { type: 'string', description: 'Replacement text for mode:"edit" (an empty string deletes the match)' },
+      replace_all: { type: 'boolean', description: 'mode:"edit": replace every occurrence instead of requiring uniqueness' },
+    },
     output: {
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
-    async execute(_args, exec) {
-      const file = dailyFile(exec)
-      const sessionId = exec?.agent?.session?.id
-      // Probe read first: success records the observation (so a merge write on
-      // an existing file passes replaceIfVersion); failure (ENOENT) means the
-      // file is absent and the write below goes createIfAbsent.
-      let existed = true
-      try {
-        await dispatch('read', { file_path: file }, exec)
-      } catch {
-        existed = false
-      }
-      const current = existed ? readMemoryFile(file) : null
-      const { text, changed } = mergeProvenance(sessionId ? current ?? '' : '', sessionId)
-      if (!existed || changed) {
-        await dispatch('write', { file_path: file, content: text }, exec)
-      }
-      return `${file} · ${existed ? 'existing' : 'created'} — maintain with native read/edit/write (read before modify)`
+    async execute(args, exec) {
+      const mode = String(args?.mode ?? 'read')
+      const sessionId = owner(exec)
+      const file = resolveTarget(args, exec)
+      if (mode === 'read') return doRead(file, sessionId, args?.topic == null)
+      if (mode === 'write') return doWrite(file, String(args?.content ?? ''), sessionId)
+      if (mode === 'edit') return doEdit(file, args ?? {}, sessionId)
+      throw new Error(`memory: unknown mode "${mode}" — use "read" (default), "write" or "edit"`)
     },
   }
 }
@@ -271,7 +377,6 @@ export function apply(ctx) {
     dailyWindowDays: 90,
     embeddingBaseUrl: '',
     embeddingModel: 'bge-m3',
-    autoMemory: true,
     longtermAppend: true,
   }
   const runtime = { ...DEFAULTS }
@@ -282,7 +387,6 @@ export function apply(ctx) {
       runtime.dailyWindowDays = Math.max(0, Math.floor(Number(source.dailyWindowDays) || 0))
       runtime.embeddingBaseUrl = source.embeddingBaseUrl ?? ''
       runtime.embeddingModel = source.embeddingModel || 'bge-m3'
-      runtime.autoMemory = source.autoMemory !== false
       runtime.longtermAppend = source.longtermAppend !== false
     }
     // setSource hands over a THUNK (() => scope.get()), not the value; it
@@ -318,36 +422,13 @@ export function apply(ctx) {
     return vectorIndex
   }
 
-  // Per-turn capture reminder (2026-08-23, restored from git history with a
-  // SHORT text — the timing detail, content rules, and usage live in the
-  // memory tool description): a runtime-context contribution assembled fresh
-  // on every model request. Deliberately short: "worth keeping in this turn →
-  // you MUST use the memory tool". Gated on config autoMemory (empty text is
-  // dropped from the rendered snapshot) and on subagents (delegationDepth >
-  // 0): their memory belongs to the main agent's consolidation.
-  ctx.effect(() => {
-    const fiber = ctx.inject(['systemPrompt'], (scope) => {
-      scope.systemPrompt.context({
-        name: 'dsh-memory:auto',
-        order: 200,
-        text: (context) => {
-          if (!runtime.autoMemory) return ''
-          const session = context.agent?.session
-          if (!session?.id) return ''
-          if ((session.header?.delegationDepth ?? 0) > 0) return ''
-          return 'When this turn produced something worth keeping across sessions, you MUST use the `memory` tool.'
-        },
-      })
-    })
-    return () => fiber.dispose()
-  })
-
-  // Model tools: memory_search (retrieval) + the path-locating `memory` tool
-  // (returns today's note path; creates/provenance-tags it; the agent then
-  // maintains the note with native read/edit/write). No host hooks.
+  // Model tools: memory_search (pure retrieval) + the three-mode `memory`
+  // file tool (native-shaped read/write/edit confined to the plugin data
+  // root). Capture etiquette lives in the user's AGENTS.md, not here — no
+  // per-turn reminder, no host hooks.
   const tools = [
     memorySearchTool(ctx, getConfig, getVectorIndex),
-    memoryLocatorTool(ctx),
+    memoryFileTool(),
   ]
   for (const tool of tools) {
     if (tool === undefined) continue

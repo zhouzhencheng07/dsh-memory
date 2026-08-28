@@ -2,35 +2,31 @@ English | [中文](README.md)
 
 # dsh-memory
 
-A cross-session global memory plugin for DeepSeek Harness (dsh).
+A cross-session memory plugin for DeepSeek Harness (dsh).
 
-The main agent decides whether this turn produced anything worth keeping
-across sessions: a **per-turn system-prompt reminder** ("when this turn has
-something worth keeping, you MUST use the memory tool" — off via
-`autoMemory: false`) nudges it to capture through the path-locating **`memory`
-tool**, which returns today's memory note path (creating it automatically and
-maintaining the session-source comment); the note is then maintained with the
-plain **native read/write/edit tools**, and all timing/content rules live in
-the `memory` tool description (sent with the tool schema on every request).
-The `memory_search` tool retrieves those notes with **block-level search**
-(optional vector fusion, per-day recency decay). Ships as a bundle plugin
-(`dsh.bundle`) — 0 patches, **zero npm dependencies, zero build step**;
-`@deepseek-ai/*` resolves through dsh's flat module fallback, so the runtime
-shares one package instance.
+Two model-side tools make up the whole mechanism: the **`memory` file tool**
+(read/write/edit modes, mirroring the native file-tool contract, with its
+read/write surface locked to this plugin's data root `$DSH_HOME/dsh-memory`)
+maintains the notes, and the **`memory_search` tool** retrieves them with
+**block-level search** (optional vector fusion, per-day recency decay).
+Capture timing and writing etiquette are NOT in the plugin — they live in the
+user's global AGENTS.md (see the suggested rules block at the end); the plugin
+ships pure mechanism. Bundle plugin form (`dsh.bundle`) — 0 patches, **zero
+npm dependencies, zero build step**; `@deepseek-ai/*` resolves through dsh's
+flat module fallback, so the runtime shares one package instance.
 
 ## Features
 
 | Feature | Description |
 |---|---|
-| **Per-turn reminder (optional)** | A short system-prompt reminder assembled on every request: "when this turn has something worth keeping across sessions, you MUST use the memory tool". Deliberately terse — the timing, content rules, and usage live in the `memory` tool description. Turn it off with `autoMemory: false` for a "record only when asked" style; the neutral `memory` tool stays usable |
-| **memory tool** | A path locator with **no arguments**: returns today's memory note for this workspace (one file per workspace per day). When the file is absent it is **created** (content = the `<!-- 会话来源: ... -->` session-source comment); when present the calling session is merged into that comment (exactly idempotent). The description carries the capture timing (decisions and reasons, user corrections/conventions, pitfalls and fixes, reusable commands/processes, state changes) and the quality rules (read before modify; edit local changes, write to create/replace the whole file; # headings per topic, merge related topics, fix outdated items in a sentence or two, no play-by-play). All file work dispatches the host's **native read/write pipeline** — same sandbox fence and read-before-modify observation as the model's own file tools (`$DSH_HOME` writes need danger-full-access) |
-| **memory_search tool** | Heading-aware block-level retrieval (any heading splits a block, breadcrumbs included), **single-field positional keyword scoring** (2026-08-25): ONE `keywords` parameter holding up to 7 space-separated terms — the **first 3 at high weight** (×3 each hit), the next 4 at low weight (×1 each) — partial credit per matched keyword, no hard AND gate (a block missing some words no longer vanishes); a **minimum-score floor `MIN_SCORE=0.5`** drops too-weak partial matches outright; formatting-tolerant matching, occurrence counts normalized by block length, **per-day decay** (30-day half-life, floor 0.4); snippets return whole blocks (≤1000 chars, usually no need to open the file); **every hit carries its ABSOLUTE path** (`$DSH_HOME/dsh-memory/...`, directly usable with native read/edit) |
-| **Two-layer library (2026-08-24)** | Diary layer `YYYY-MM-DD/` (ephemeral, **hard window** `dailyWindowDays` default 90 days — aged notes leave the searchable corpus but stay on disk; 0 = unlimited) + long-term layer `memory/memory.md` (ONE file organized by topic headings, **never decays, never windowed**). Whenever a search returns results, ONE unconditional hint is appended: record lasting facts referenced above into the matching memory.md topic heading and fix outdated statements there; empty results stay quiet. When no long-term block makes the list and `longtermAppend` is on (default), the best-ranking one from the candidate pool is APPENDED after the regular results (never evicting, works with limit=1). No hit counters, zero state files |
+| **memory tool (three-mode file tool, 2026-08-28)** | **No arguments = read today's note**: returns the full text of this workspace's note for today (ABSENT — listing existing long-term topics — when there is none, zero disk writes); `mode:"write"` + `content` creates or fully replaces; `mode:"edit"` + `old_string`/`new_string` (+`replace_all`) does a unique literal replace; the optional `topic` parameter targets a long-term library file `memory/<topic>.md`. **Observation guard mirrors the native tools**: per-session present/absent + version records — write refused when the file exists but was not read this session (createIfAbsent), write/edit refused when the file changed since that read (CAS "read it again"), edit refused when unread (FS_NOT_OBSERVED), old_string refused on multiple matches (FS_AMBIGUOUS_EDIT); atomic tmp+rename writes. **The plugin writes its own data root directly** (trusted node:fs writes; paths are tool-derived or whitelist-validated, the model only supplies content) — bypassing the sandbox fence built into the fs backend (its per-write manual escalation is unusable for automatic capture), so **capture works under every permission mode, workspace-write included** |
+| **memory_search tool** | Heading-aware block-level retrieval (any heading splits a block, breadcrumbs included), **single-field positional keyword scoring** (2026-08-25): ONE `keywords` parameter holding up to 7 space-separated terms — the **first 3 at high weight** (×3 each hit), the next 4 at low weight (×1 each) — partial credit per matched keyword, no hard AND gate; a **minimum-score floor `MIN_SCORE=0.5`**; formatting-tolerant matching, occurrence counts normalized by block length, **per-day decay** (30-day half-life, floor 0.4); snippets return whole blocks (≤1000 chars); **every hit carries its ABSOLUTE path**. Pure retrieval (2026-08-28): no promotion hint is appended anymore |
+| **Two-layer library** | Diary layer `YYYY-MM-DD/` (ephemeral, **hard window** `dailyWindowDays` default 90 days — aged notes leave the searchable corpus but stay on disk; 0 = unlimited) + long-term layer `memory/<topic>.md` (**free topic files**, 2026-08-28: one topic per file, never decays, never windowed; the search layer supports this with zero changes). Division of labor: **experience that still holds in another project goes to the long-term layer** (environment/tooling lessons, collaboration preferences, general patterns); play-by-play events go to the diary; **must-follow rules belong in AGENTS.md, not memory**; durable project-specific facts graduate into AGENTS.md or age out with the diary window (an accepted trade-off that forces curation). No hit counters, zero state files |
 | **Vector fusion (optional)** | With an Ollama-compatible embedding service configured, upgrades automatically to keyword + vector RRF fusion (k=60); falls back to pure keyword matching when the service is down — `memory_search` never fails because of vectors |
 | **Config card** | Settings → Plugins → Plugin config → Memory; hot-reloads on save (persisted to settings.yaml, no restart) |
 
-No commands — the per-turn reminder (when enabled) tells the model when the
-`memory` tool must be used; retrieval goes through the `memory_search` tool.
+No commands — capture timing and etiquette live in the user's global AGENTS.md;
+retrieval goes through the `memory_search` tool.
 
 ## Storage layout
 
@@ -40,17 +36,17 @@ untouched:
 ```
 $DSH_HOME/dsh-memory/
 ├── memory/
-│   └── memory.md           # long-term memory: ONE file organized by topic headings, never decays, never windowed
+│   ├── <topic>.md          # long-term memory: one topic per file (short kebab-case names), never decays, never windowed
+│   └── ...
 └── YYYY-MM-DD/
     └── <workspace-slug>.md # one file per workspace per day (diary layer, subject to the search window)
 ```
 
-- **Two-layer semantics**: today's work goes to the diary; lasting facts
-  (user preferences, environment facts, standing conventions) are promoted by
-  the agent into `memory/memory.md` topic blocks AT REUSE TIME — when a search
-  surfaces them (read-before-edit; outdated statements are corrected in place,
-  so the single source of truth converges in that one file). Diary originals
-  are never rewritten back; they simply age out of the window.
+- **Two-layer semantics**: play-by-play events go to the diary; cross-project
+  evergreen experience goes to long-term topic files (via the `topic`
+  parameter — routed at capture time by the user's AGENTS.md rules, or
+  promoted at reuse time: a hit long-term block is authoritative, outdated
+  statements are corrected in place, near-duplicates merged)
 - **No state files**: no watermarks, turn counters, or hit counters; dates and
   the window are resolved at query time and roll over to the new day's file
   automatically at midnight
@@ -75,78 +71,90 @@ commits).
 
 ## How it works
 
-- `src/index.js`: the path-locating `memory` tool (no arguments) — computes
-  today's note path from the session cwd, probes it with a dispatched native
-  `read` (records the observation, so the merge below passes the version
-  guard), then dispatches a native `write` when the file is absent (creating
-  it with the source comment) or when the calling session id is missing from
-  the comment (idempotent, no write otherwise); plus the per-turn reminder, a
-  `systemPrompt.context` contribution (`dsh-memory:auto`, order 200) gated on
-  `autoMemory` and on subagents — its text is deliberately short, all rules
-  live in the tool description. **No host hooks** (no `tools/result` /
-  turn-stopping listeners): a session that knows the note path has already
-  called the `memory` tool, so its source is already maintained
+- `src/index.js`: the three-mode `memory` file tool — no args (or
+  `mode:"read"`) returns the full text of today's note / a topic file and
+  records the observation; `mode:"write"` goes through the createIfAbsent/CAS
+  guard and then publishes atomically (tmp + rename); `mode:"edit"` validates
+  the observation and unique match before a read-modify-write. The
+  observation guard is keyed per session (mirroring
+  `@deepseek-ai/dsh-fs-observation-policy`), and all file work is done by the
+  **plugin itself** via node:fs (the sandbox fence lives inside the fs
+  backend — `dsh-fs-sandbox`'s `checkedTarget`; both the native pipeline and
+  direct `ctx.fs` calls refuse `$DSH_HOME` writes under workspace-write, and
+  the tool layer's only widening path needs per-write manual approval; a
+  plugin writing its own data root is trusted host behavior, with
+  path derivation/whitelisting keeping the write surface bounded). **No host
+  hooks, no per-turn reminder** (etiquette externalized to AGENTS.md since
+  2026-08-28)
 - `src/search.js`: any heading (`#`–`######`) is a chunk boundary and
   subsections become standalone blocks with ancestor breadcrumbs;
   **single-field positional keyword scoring** — one `keywords` string split on
   whitespace, the **first 3 terms are essential (×3 per hit)** and the **next
-  4 refining (×1)**, first-occurrence dedupe, over-cap drops reported back
-  (2026-08-25, replacing the explicit two-parameter groups to match the
-  single-query-field convention of mainstream tools; partial credit per
-  matched keyword carries over from the 2026-08-24 fix whose measured root
-  cause was tier-3's hard AND zeroing partial matches); both sides go through
-  `looseNormalize` (formatting marks stripped, identifiers `-` `_` `.` kept);
-  the weighted count is normalized by block length; each block's score is
-  multiplied by `max(0.4, 0.5^(days/30))` (per-day decay); blocks under
-  `MIN_SCORE=0.5` never return (primary matches survive even at the recency
-  floor ~0.6, while isolated context-term noise on old blocks is cut);
-  exact dedup via `rel#breadcrumb`
+  4 refining (×1)**, first-occurrence dedupe, over-cap drops reported back;
+  partial credit per matched keyword; the weighted count is normalized by
+  block length; each block's score is multiplied by `max(0.4, 0.5^(days/30))`
+  (per-day decay); blocks under `MIN_SCORE=0.5` never return; exact dedup via
+  `rel#breadcrumb`
 - `src/embed.js`: optional vector path — in-memory index with sha1 signature
   caching (unchanged files are never re-embedded), cosine ≥ 0.45 joins the
   fusion, RRF k=60; embedding model defaults to `bge-m3`
-- `src/store.js`: pure-function vocabulary — path/slug/date derivation,
-  provenance-comment parsing and merging (`mergeProvenance`, exactly
-  idempotent), `walkMemory(windowDays)` (the hard window applies ONLY to
-  subdirectories whose name parses as a date — aged diaries leave the index
-  but stay on disk; non-date dirs like `memory/` are always indexed. The
-  plugin never writes to disk directly; file work goes through the dispatched
-  native read/write tools)
+- `src/store.js`: pure-function vocabulary — path/slug/date derivation (both
+  slash spellings of a cwd normalize to one slug), `walkMemory(windowDays)`
+  (the hard window applies ONLY to subdirectories whose name parses as a
+  date — aged diaries leave the index but stay on disk; non-date dirs like
+  `memory/` are always indexed)
 - `client/bundle.js`: hand-written client bundle registering into the
   `settings.plugin.item` keyed slot (`key: 'dsh-memory'`); reads and writes go
   through the official client settings scope (`ctx.settingsScope.bind`) —
-  revision-fenced mutations, mirror refreshes on document commits/reconnects.
-  (The pre-rc.7 hand-rolled `/dsh-memory/config` HTTP endpoint was removed:
-  dsh rc.7 dropped the api-proxy namespace whitelist that had forced it.)
-- New-vs-old conflicts resolve at query time: decay favors newer notes, and the
-  tool description instructs merging multiple hits on the same topic instead of
-  trusting only the newest one
+  revision-fenced mutations, mirror refreshes on document commits/reconnects
+- New-vs-old conflicts resolve at query time: decay favors newer notes, and
+  the etiquette (AGENTS.md side) instructs merging multiple hits on the same
+  topic instead of trusting only the newest one
 
 ## Usage
 
 ```sh
 # model-side tool: search the memory library (ONE keywords parameter, up to 7
-# terms, most essential FIRST — first 3 high-weight, next 4 low-weight;
-# partial credit per matched keyword — older notes rank lower but stay
-# reachable, newer notes win; too-weak hits are dropped by the score floor)
+# terms, most essential FIRST)
 memory_search keywords="vector search threshold embedding"
 
-# model-side tool: locate today's memory note — returns the path, creates the
-# file (with the source comment) when absent, merges this session into the
-# source comment when present
+# model-side tool: read today's memory note (no args = read) — returns the
+# full text; ABSENT means there is none yet
 memory
 
-# then maintain the note with the NATIVE file tools (read before modify):
-read file_path="<path from memory>"
-edit file_path="<path>" old_string="..." new_string="..."
-# or write file_path="<path>" content="# Topic ..." to create/replace the whole file
+# create (mode:"write") / modify in place (mode:"edit")
+memory mode="write" content="# Topic ..."
+memory mode="edit" old_string="old sentence" new_string="new sentence"
+
+# cross-project evergreen experience goes into long-term topic files
+memory topic="windows-env" mode="write" content="# Windows environment lessons ..."
+memory topic="windows-env" mode="edit" old_string="pnpm dual instance" new_string="pnpm dual instance (avoid via --allow-scripts since 2026-08)"
 ```
 
-With `autoMemory: true` (default) every turn carries a short reminder — when
-this turn produced something worth keeping across sessions, the `memory` tool
-**must** be used; the file's leading `<!-- 会话来源: ... -->` comment is
-maintained automatically by the tool. With `autoMemory: false` there is no
-reminder — record only when asked (the tool description stays neutral, no
-"must" wording).
+## Suggested rules (paste into your global AGENTS.md)
+
+The plugin ships no capture reminder; put rules like this into your **global
+AGENTS.md** (user scope, effective across projects):
+
+```markdown
+## Cross-session memory (dsh-memory plugin)
+
+- At the end of a turn that produced something worth keeping across sessions,
+  use the `memory` tool — read first: no args reads today's note; create with
+  mode:"write" when absent; modify in place with mode:"edit" when present.
+- Record experience, not play-by-play: decisions and reasons, pitfalls and
+  fixes, reusable commands/processes, state changes. Organize under # headings,
+  merge related topics, correct outdated statements in place.
+- Experience that still holds in another project (environment/tooling lessons,
+  my collaboration preferences, general patterns) goes into long-term topic
+  files: the memory tool with a topic parameter (short English kebab-case
+  names, e.g. windows-env).
+- Do not put must-follow rules into memory — tell me to add them to this
+  AGENTS.md instead.
+- Search with memory_search (up to 7 terms, most essential first); when a
+  long-term topic block is among the hits treat it as authoritative, fix stale
+  statements in place, merge obvious duplicates.
+```
 
 ## Configuration
 
@@ -159,7 +167,6 @@ dsh-memory:
   dailyWindowDays: 90       # diary hard window in days: aged diaries stop participating in search (0 = unlimited); memory/ is exempt
   embeddingBaseUrl: ''      # Ollama-compatible /api/embed base URL (e.g. http://localhost:11434); empty disables vector search
   embeddingModel: 'bge-m3'  # embedding model name
-  autoMemory: true          # per-turn reminder ("worth keeping -> must use the memory tool"); false = record only when asked
   longtermAppend: true      # when no long-term block made the list, append the best-ranking one (no eviction); false = pure top-N
 ```
 

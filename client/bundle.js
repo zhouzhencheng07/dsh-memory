@@ -41,15 +41,13 @@ window.__ModuleLoader__.load({
       searchLimit: "Search result limit",
       searchLimitHint: "Result count for memory_search (1-10); the agent cannot override it.",
       dailyWindowDays: "Diary search window (days)",
-      dailyWindowDaysHint: "Daily notes older than this stop participating in search (0 = unlimited); files stay on disk. The long-term memory/memory.md is never windowed.",
+      dailyWindowDaysHint: "Daily notes older than this stop participating in search (0 = unlimited); files stay on disk. Long-term topic files (memory/) are never windowed.",
       embeddingBaseUrl: "Embedding base URL",
       embeddingBaseUrlHint: "Ollama base URL (e.g. http://localhost:11434) for vector search; blank disables it.",
       embeddingModel: "Embedding model",
       embeddingModelHint: "Embedding model name served by the base URL (e.g. bge-m3).",
-      autoMemory: "Per-turn memory reminder",
-      autoMemoryHint: "Remind every turn: when something is worth keeping across sessions, the memory tool must be used. Off = record only when asked.",
       longtermAppend: "Append long-term block",
-      longtermAppendHint: "When no memory/memory.md block is among the results, append the best-ranking one after them instead of leaving it out.",
+      longtermAppendHint: "When no long-term (memory/) block is among the results, append the best-ranking one after them instead of leaving it out.",
       overridden: "Overridden",
       reset: "Reset to default",
       save: "Save",
@@ -69,15 +67,13 @@ window.__ModuleLoader__.load({
       searchLimit: "搜索返回条数",
       searchLimitHint: "memory_search 返回条数（1-10），agent 不可覆盖。",
       dailyWindowDays: "日记检索窗口（天）",
-      dailyWindowDaysHint: "超过该天数的每日笔记不再参与检索（0=不限），文件保留在磁盘；长期记忆 memory/memory.md 不受窗口限制。",
+      dailyWindowDaysHint: "超过该天数的每日笔记不再参与检索（0=不限），文件保留在磁盘；长期主题文件（memory/）不受窗口限制。",
       embeddingBaseUrl: "向量嵌入服务地址",
       embeddingBaseUrlHint: "Ollama 基地址（如 http://localhost:11434），用于向量检索；留空禁用。",
       embeddingModel: "嵌入模型",
       embeddingModelHint: "该服务上的嵌入模型名（如 bge-m3）。",
-      autoMemory: "每轮记忆提醒",
-      autoMemoryHint: "每轮提醒：本轮有值得跨会话保留的内容时必须使用 memory 工具；关闭后仅在明确要求时记录。",
       longtermAppend: "长期块追加返回",
-      longtermAppendHint: "结果中没有 memory/memory.md 块时，在其后追加一条排名最高的长期块（不挤占名额）。",
+      longtermAppendHint: "结果中没有长期层（memory/）块时，在其后追加一条排名最高的长期块（不挤占名额）。",
       overridden: "已覆盖",
       reset: "恢复默认",
       save: "保存",
@@ -146,13 +142,6 @@ window.__ModuleLoader__.load({
           return trimmed === "" ? { kind: "clear" } : { kind: "set", value: trimmed };
         }
       },
-      autoMemory: {
-        kind: "bool",
-        label: "autoMemory",
-        hint: "autoMemoryHint",
-        format: (value) => (value === false ? "false" : "true"),
-        parse: (text) => ({ kind: "set", value: text === "true" })
-      },
       longtermAppend: {
         kind: "bool",
         label: "longtermAppend",
@@ -160,15 +149,13 @@ window.__ModuleLoader__.load({
         format: (value) => (value === false ? "false" : "true"),
         parse: (text) => ({ kind: "set", value: text === "true" })
       }
-      // ── autoMemory restored 2026-08-23: the per-turn reminder is the capture
-      // path again (SHORT text — "worth keeping → must use the memory tool");
-      // content rules live in the memory tool description. Off = no reminder;
-      // the neutral memory tool stays usable. No end-of-turn hook, no
-      // tools/result provenance hook (the memory tool maintains provenance). ──
+      // ── autoMemory removed 2026-08-28: the per-turn reminder was dropped
+      // with the etiquette-externalization decision — capture rules live in
+      // the user's global AGENTS.md, the tools stay pure mechanism. ──
       // ── longtermAppend added 2026-08-25: the long-term append seat is now a
       // user-facing toggle (host default true = additive seat on). ──
     };
-    const FIELDS = ["searchLimit", "dailyWindowDays", "embeddingBaseUrl", "embeddingModel", "autoMemory", "longtermAppend"];
+    const FIELDS = ["searchLimit", "dailyWindowDays", "embeddingBaseUrl", "embeddingModel", "longtermAppend"];
 
     // ── theme-aligned styles (dsw alias tokens, as the official cards use) ──
     // (dropped during the migration rewrite once — the card then crashed every

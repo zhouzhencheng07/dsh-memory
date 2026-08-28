@@ -77,6 +77,15 @@ memory topic="windows-env" mode="edit" old_string="pnpm 双实例" new_string="p
 
 `autoMemory: true`（默认）时每轮带一条短提醒——本轮有值得跨会话保留的内容时**必须使用 `memory` 工具**；`autoMemory: false` 时无提醒——仅在明确要求时记录。
 
+## 跨 agent 共享（技能半边）
+
+`skill/agent-memory/` 是记忆库的**便携半边**：零依赖 CLI（`mem.mjs`）+ Agent Skill 定义（`SKILL.md`），供 dsh 之外的 agent（一切有 shell + node 的 agent，如 ZCode）读写**同一个**记忆库。
+
+- **同一个库**：记忆根经 `AGENT_MEMORY_HOME` 环境变量或 `--home` 参数指向本插件数据根 `$DSH_HOME/dsh-memory`（故意不设默认值——绝不悄悄建出第二个分叉库）；`search.js` 与插件 `src/search.js` **逐字节相同**（测试守卫强制同步），排序行为完全一致
+- **写守卫无状态化**：读取输出 `[hash: ...]`，对已存在文件的 write 与一切 edit 必须带 `--expect-hash`（内容哈希 CAS），每次变更输出新哈希可链式编辑；其余语义（两层布局、位置加权、长期席位、组成驱动固化指引）与插件一致；仅去掉了可选向量融合（保持零依赖）
+- **安装**：把 `skill/agent-memory/` 整目录拷进目标 agent 的技能目录（如 ZCode 的 `~/.zcode/skills/` 或项目 `.agents/skills/`）；dsh 侧零操作——`package.json` 的 `files` 白名单不含 `skill/`，**插件安装/更新永不携带它**
+- **边界**：每轮提醒（捕获时机）是 dsh 插件专属能力，别的 agent 侧天然是"读为主、按需写"；想要时机指引就在对方的指令文件里写一句话
+
 ## 配置
 
 `$DSH_HOME/settings.yaml`（热更新，不用重启；也可在设置页配置卡片改）：

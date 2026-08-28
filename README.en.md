@@ -152,6 +152,32 @@ this turn produced something worth keeping across sessions, the `memory` tool
 **must** be used. With `autoMemory: false` there is no reminder — record only
 when asked.
 
+## Sharing with other agents (skill half)
+
+`skill/agent-memory/` is the library's **portable half**: a zero-dependency CLI
+(`mem.mjs`) plus an Agent Skill definition (`SKILL.md`) that lets agents other
+than dsh (anything with a shell + node, e.g. ZCode) read and write **the same**
+memory library.
+
+- **One library**: the memory root points at this plugin's data root
+  `$DSH_HOME/dsh-memory` via the `AGENT_MEMORY_HOME` environment variable or
+  `--home` (deliberately no default — it must never silently create a second,
+  divergent library); `search.js` is **byte-identical** to the plugin's
+  `src/search.js` (enforced by a test), so ranking behaves identically
+- **Stateless write guard**: reads print `[hash: ...]`; `write` on an existing
+  file and every `edit` require `--expect-hash` (content-hash CAS); every
+  mutation prints the NEW hash so edits can chain. Everything else (two-layer
+  layout, positional scoring, long-term seat, composition-driven hints) matches
+  the plugin; only the optional vector fusion is dropped (keeps it
+  dependency-free)
+- **Install**: copy the whole `skill/agent-memory/` folder into the target
+  agent's skill directory (e.g. ZCode's `~/.zcode/skills/` or a project's
+  `.agents/skills/`); dsh needs no action — the `package.json` `files`
+  whitelist excludes `skill/`, so **plugin installs/updates never carry it**
+- **Boundary**: the per-turn reminder (capture timing) is a dsh-plugin
+  capability; other agents are naturally read-mostly, write-on-demand. If you
+  want timing guidance there, add one line to the agent's instructions file
+
 ## Configuration
 
 `$DSH_HOME/settings.yaml` (hot-reloaded, no restart needed; also editable via

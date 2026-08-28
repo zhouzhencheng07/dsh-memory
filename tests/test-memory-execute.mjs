@@ -68,7 +68,8 @@ await assert.rejects(() => search.execute({ keywords: '   ' }), /no usable keywo
 
 // --- hard daily window (default 90) -------------------------------------------
 const outOld = await search.execute({ keywords: 'gammaunique' })
-assert.match(outOld, /^No memory found\.$/, '200-day-old diary is outside the 90-day window')
+assert.ok(outOld.includes('No memory found.'), '200-day-old diary is outside the 90-day window')
+assert.match(outOld, /no note contains "gammaunique"/, 'the absent keyword is reported back for rewording')
 assert.ok(!outOld.includes('topics/<topic>'), 'empty results carry no promotion hint')
 
 const outMid = await search.execute({ keywords: 'betaunique' })

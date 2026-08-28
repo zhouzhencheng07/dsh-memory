@@ -39,6 +39,24 @@
 // the keyword list. Counts are damped by block length (BM25-style), then
 // multiplied by the note's recency decay weight. Blocks whose final score
 // falls below MIN_SCORE never return at all (2026-08-25).
+//
+// IDF TERM WEIGHTING (2026-08-29, user-observed noise: generic words pulled
+// irrelevant blocks): every keyword's contribution is scaled by a
+// corpus-normalized inverse document frequency — raw BM25 idf
+// ln(1 + (N-df+0.5)/(df+0.5)), divided by the df=1 value so a term UNIQUE in
+// the corpus weighs exactly 1.0 (legacy scale preserved) while a term
+// appearing in EVERY block scales toward 0 and can no longer carry a hit
+// past MIN_SCORE on its own. This kills the generic-word failure WITHOUT
+// reintroducing a hard AND gate. Keywords absent from the corpus, or present
+// in every block, are reported through the optional `notices` array so the
+// caller can reword.
+//
+// ASCII WORD BOUNDARIES (2026-08-29): pure-alphabetic keywords
+// ([A-Za-z][A-Za-z_-]*) count only matches that are not glued to other
+// identifier characters — `log` no longer matches `catalog` or `login`.
+// Needles carrying digits or dots (version strings: 0.2.2 inside v0.2.2 is a
+// WANTED match) and all CJK terms keep substring semantics (no segmentation
+// available for CJK).
 
 /** Cap on the LEADING essential keywords (positional group 1, high weight). */
 export const MAX_PRIMARY_KEYWORDS = 3
@@ -49,11 +67,12 @@ export const PRIMARY_WEIGHT = 3
 /** Per-keyword score bonus for a secondary-group hit (low). */
 export const SECONDARY_WEIGHT = 1
 /** Floor for a block's final score: below this it is not returned at all
- * (2026-08-25 user decision: too-low hits are noise). Scale reference —
- * a single primary hit on an average-length block lands ~1.5 fresh and
- * ~0.6 at the recency floor; a single secondary-only hit ~0.5 fresh and
- * ~0.2 aged. So 0.5 keeps every primary match plus any FRESH secondary-only
- * match, dropping stale secondary-only noise. */
+ * (2026-08-25 user decision: too-low hits are noise; recalibrated 2026-08-29
+ * for IDF weighting). Scale reference with IDF — a df=1 (corpus-unique)
+ * keyword weighs 1.0, so a single primary hit on an average-length block
+ * lands ~1.5 fresh and ~0.6 at the recency floor; a single secondary-only
+ * hit ~0.5 fresh and ~0.2 aged. A keyword present in EVERY block weighs
+ * ~0, so a block matching only generic terms falls under the floor. */
 export const MIN_SCORE = 0.5
 
 /** Max chars of a returned snippet window (oversized-block fallback). */
@@ -140,11 +159,37 @@ export function parseKeywords(input) {
   return { primary, secondary, notices }
 }
 
-/** Non-overlapping count of `needle` occurrences in `value` (case-insensitive). */
+/** Corpus-normalized BM25-style IDF (2026-08-29): raw idf
+ * ln(1 + (N-df+0.5)/(df+0.5)) divided by its df=1 value, so a term UNIQUE in
+ * the corpus weighs exactly 1.0 (legacy scale) and every additional block
+ * containing the term scales it down — a term in EVERY block weighs
+ * ln(1+0.5/(N+0.5)) / ln((N+1)/1.5), a fraction of a percent, and cannot
+ * carry a hit past MIN_SCORE alone. df<=0 or an empty corpus weigh 0.
+ * @param {number} df - blocks containing the term (>=1)
+ * @param {number} total - blocks in the current corpus (>=1)
+ * @returns {number} weight in (0, 1]
+ */
+export function idfWeight(df, total) {
+  if (total <= 0 || df <= 0) return 0
+  return Math.log(1 + (total - df + 0.5) / (df + 0.5)) / Math.log((total + 1) / 1.5)
+}
+
+/** Pure-alphabetic identifier keyword (optionally dashed/underscored): these
+ * match with WORD BOUNDARIES. Anything carrying digits or dots (version
+ * strings — `0.2.2` inside `v0.2.2` is a wanted match) and all CJK fall back
+ * to substring counting (no segmentation available for CJK). */
+const BOUNDARY_RE = /^[A-Za-z][A-Za-z_-]*$/
+
+/** Non-overlapping count of `needle` occurrences in `value` (case-insensitive;
+ * boundary-aware for pure-alphabetic ASCII needles). */
 export function occurrenceCount(value, needle) {
   const haystack = normalize(value)
   const n = normalize(needle)
   if (n.length === 0 || n.length > haystack.length) return 0
+  if (BOUNDARY_RE.test(n)) {
+    const escaped = n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    return (haystack.match(new RegExp(`(?<![A-Za-z0-9_-])${escaped}(?![A-Za-z0-9_-])`, 'g')) ?? []).length
+  }
   let count = 0
   let offset = 0
   while (offset <= haystack.length - n.length) {
@@ -234,14 +279,16 @@ export function blockSnippet(text, query) {
 }
 
 /**
- * Search memory entries at BLOCK level with POSITIONAL keyword scoring
- * (2026-08-25 revision of the two-group scheme): every keyword that literally
- * appears in a block adds `PRIMARY_WEIGHT` / `SECONDARY_WEIGHT` (by
- * positional group, see parseKeywords) times its
- * occurrence count — partial credit, no hard AND gate, so a block matching
- * only some keywords still surfaces (ranked by how much it did match).
- * Matching is formatting-tolerant: both sides go through looseNormalize(),
- * so backticks/quotes/bold marks never break a hit (identifier characters
+ * Search memory entries at BLOCK level with POSITIONAL keyword scoring and
+ * IDF term weighting (2026-08-29): every keyword that literally appears in a
+ * block adds `PRIMARY_WEIGHT` / `SECONDARY_WEIGHT` (by positional group, see
+ * parseKeywords) times its occurrence count times its corpus-normalized IDF
+ * (see idfWeight — a corpus-unique keyword weighs 1.0, a keyword present in
+ * every block weighs ~0) — partial credit, no hard AND gate, so a block
+ * matching only some keywords still surfaces (ranked by how much it did
+ * match), while generic-word-only matches fall below MIN_SCORE. Matching is
+ * formatting-tolerant: both sides go through looseNormalize(), so
+ * backticks/quotes/bold marks never break a hit (identifier characters
  * `-` `_` `.` survive whole). The summed weighted count is damped by block
  * length (BM25-style, relative to the corpus average block length), then
  * multiplied by the note's recency decay weight (old notes recede but never
@@ -255,9 +302,12 @@ export function blockSnippet(text, query) {
  * @param {string[]} primaryKeywords - group-1 keywords (essential, high bonus)
  * @param {string[]} secondaryKeywords - group-2 keywords (refining, low bonus)
  * @param {number} [limit=5]
+ * @param {string[]} [notices=null] - when an array is passed, keyword health
+ *   is reported into it ("no note contains X" / "X is in every note") so the
+ *   caller can reword its query
  * @returns {Array<{rel: string, date: string, kind: string, score: number, snippet: string}>}
  */
-export function searchMemory(entries, primaryKeywords = [], secondaryKeywords = [], limit = 5) {
+export function searchMemory(entries, primaryKeywords = [], secondaryKeywords = [], limit = 5, notices = null) {
   const primary = (primaryKeywords ?? []).map(looseNormalize).filter(Boolean)
   const secondary = (secondaryKeywords ?? []).map(looseNormalize).filter(Boolean)
   if (primary.length === 0 && secondary.length === 0) return []
@@ -266,23 +316,38 @@ export function searchMemory(entries, primaryKeywords = [], secondaryKeywords = 
     for (const s of splitBlocks(entry.text ?? '')) {
       // skip title-only blocks (no body signal), same as the vector path
       if (isTitleOnly(s.text)) continue
-      blocks.push({ entry, block: s })
+      blocks.push({ entry, block: s, loose: looseNormalize(s.text) })
     }
   }
+  // corpus statistics: document frequency per keyword over the CURRENT
+  // blocks (the set is deduped — primary and secondary may overlap)
+  const keywords = [...new Set([...primary, ...secondary])]
+  const df = new Map(keywords.map((k) => [k, 0]))
+  for (const { loose } of blocks) {
+    for (const keyword of keywords) {
+      if (occurrenceCount(loose, keyword) > 0) df.set(keyword, df.get(keyword) + 1)
+    }
+  }
+  if (notices !== null) {
+    for (const keyword of keywords) {
+      const d = df.get(keyword)
+      if (d === 0) notices.push(`no note contains "${keyword}"`)
+      else if (d === blocks.length && blocks.length > 1) notices.push(`"${keyword}" is in every note — too generic to rank by`)
+    }
+  }
+  const idf = new Map(keywords.map((k) => [k, idfWeight(df.get(k), blocks.length)]))
   const totalLen = blocks.reduce((sum, b) => sum + b.block.text.length, 0)
   const avgLen = Math.max(1, totalLen / Math.max(1, blocks.length))
   const groups = [[PRIMARY_WEIGHT, primary], [SECONDARY_WEIGHT, secondary]]
   const hits = []
-  for (const { entry, block } of blocks) {
-    // one tolerant view per block; every keyword scores against it
-    const looseText = looseNormalize(block.text)
+  for (const { entry, block, loose } of blocks) {
     let weighted = 0
     let needle = ''
-    for (const [weight, keywords] of groups) {
-      for (const keyword of keywords) {
-        const occ = occurrenceCount(looseText, keyword)
+    for (const [weight, group] of groups) {
+      for (const keyword of group) {
+        const occ = occurrenceCount(loose, keyword)
         if (occ === 0) continue
-        weighted += weight * occ
+        weighted += weight * occ * idf.get(keyword)
         if (!needle) needle = keyword // snippet window centers on the first hit
       }
     }
@@ -295,7 +360,7 @@ export function searchMemory(entries, primaryKeywords = [], secondaryKeywords = 
       date: entry.date,
       kind: entry.kind,
       score,
-      snippet: blockSnippet(looseText, needle),
+      snippet: blockSnippet(loose, needle),
     })
   }
   hits.sort((a, b) => {

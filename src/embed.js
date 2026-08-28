@@ -1,4 +1,4 @@
-// dsh-memory — optional vector retrieval (v3).
+// dsh-memory — optional vector retrieval (v4: persisted signature cache).
 //
 // Zero-dependency by default: nothing here runs until `embeddingBaseUrl` is
 // configured (settings.yaml, hot-reloaded). When configured, memory_search
@@ -11,14 +11,34 @@
 //     vector path and the substring path use the SAME block granularity and
 //     produce matching `rel#title` hits for dedup), and each block gets its
 //     own vector — a whole-file vector dilutes the semantics of a long file.
-//   - cache: a sha1 signature of the file text keys the in-memory index;
-//     files whose text changed are re-embedded lazily on the next search
-//     (first search after a change pays the embedding cost).
+//   - cache: a sha1 signature of the file text keys the index; files whose
+//     text changed are re-embedded lazily on the next search (first search
+//     after a change pays the cost of the changed file only). Since v4 the
+//     cache PERSISTS to `<memory root>/.vector-cache.json` (atomic tmp+
+//     rename, written only when something changed), so the first search
+//     after a dsh restart no longer rebuilds the whole corpus — the dominant
+//     latency in vector mode. The cache file sits at the memory ROOT where
+//     walkMemory never looks (it only scans subdirectories for .md), so it
+//     is invisible to the search corpus and to other agents sharing the
+//     library. It is a regenerable derived artifact, not bookkeeping state.
+//   - window & mutation handling: the cache mirrors the LAST refresh's walk
+//     — the live index is always the intersection of cache and the current
+//     walk, because query() refreshes against walkMemory() BEFORE scoring:
+//     diaries aging out of the 45-day window and deleted/renamed files are
+//     pruned at refresh time, and pruned entries leave the persisted cache
+//     on the next save. Aged files re-embed once if the window is widened.
+//   - model binding: the cache records the embedding model; a model change
+//     invalidates it wholesale (vectors from different models are not
+//     comparable). The cache format carries a version for invalidation when
+//     the block-splitting algorithm changes.
 //   - resilience: every network error propagates to the caller, which falls
 //     back to pure substring results; a broken embedding service never
-//     breaks memory_search.
+//     breaks memory_search. Cache READ and WRITE failures degrade to the
+//     in-memory behavior (warn, never throw).
 
 import { createHash } from 'node:crypto'
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { blockSnippet, splitBlocks } from './search.js'
 
 /**
@@ -32,6 +52,13 @@ export const VEC_THRESHOLD = 0.45
 export const VEC_BATCH = 32
 /** Per-request timeout (ms). */
 export const EMBED_TIMEOUT_MS = 15_000
+/** Persisted-cache format version: bump to invalidate every cached vector
+ * when the block-splitting or normalization semantics change. */
+export const VEC_CACHE_VERSION = 1
+/** Vector components are rounded to this many decimals on save — cosine
+ * differences at 1e-5 are meaningless against the 0.45 threshold, and full
+ * float precision would triple the cache file size. */
+const VEC_DECIMALS = 5
 
 /** L2-normalize a vector so cosine similarity is a dot product. */
 export function normalizeVec(vec) {
@@ -99,31 +126,85 @@ export class EmbeddingClient {
 }
 
 /**
- * In-memory vector index over the memory library, keyed by a sha1 signature
- * of each file's text: unchanged files are never re-embedded (first search
- * after a change pays the cost of the changed file only).
+ * Vector index over the memory library, keyed by a sha1 signature of each
+ * file's text: unchanged files are never re-embedded (first search after a
+ * change pays the cost of the changed file only). With `cachePath` set the
+ * signature→vector map persists across dsh restarts (see the module header).
  */
 export class VectorIndex {
   /**
    * @param {EmbeddingClient} client
-   * @param {{threshold?: number}} [opts]
+   * @param {{threshold?: number, cachePath?: string|null}} [opts]
    */
   constructor(client, opts = {}) {
     this.client = client
     this.threshold = opts.threshold ?? VEC_THRESHOLD
+    this.cachePath = opts.cachePath ?? null
     /** @type {Map<string, {sig: string, date: string, kind: string, blocks: Array<{title: string, text: string, vec: number[]}>}>} */
     this.files = new Map()
     this.refreshing = null
+    this.cacheDirty = false
+    this.loadCache()
   }
 
   sig(text) {
     return createHash('sha1').update(String(text)).digest('hex')
   }
 
+  /** Best-effort cache load: absent, corrupt, version-mismatched, or
+   * built by another model all degrade to a cold in-memory start. */
+  loadCache() {
+    if (!this.cachePath) return
+    try {
+      const raw = JSON.parse(readFileSync(this.cachePath, 'utf8'))
+      if (raw?.version !== VEC_CACHE_VERSION || raw?.model !== this.client.model || typeof raw?.files !== 'object') return
+      for (const [rel, entry] of Object.entries(raw.files)) {
+        if (typeof entry?.sig !== 'string' || !Array.isArray(entry?.blocks)) continue
+        this.files.set(rel, {
+          sig: entry.sig,
+          date: String(entry.date ?? ''),
+          kind: String(entry.kind ?? 'note'),
+          blocks: entry.blocks
+            .filter((b) => typeof b?.t === 'string' && Array.isArray(b?.v) && b.v.every((x) => Number.isFinite(x)))
+            .map((b) => ({ title: b.t, text: String(b.x ?? ''), vec: b.v })),
+        })
+      }
+    } catch {
+      // no cache file yet, or an unreadable one — start cold, never throw
+    }
+  }
+
+  /** Persist the index (atomic tmp+rename) when anything changed; failures
+   * only cost the next restart a rebuild, so they warn instead of throwing. */
+  saveCache() {
+    if (!this.cachePath || !this.cacheDirty) return
+    try {
+      const payload = { version: VEC_CACHE_VERSION, model: this.client.model, files: {} }
+      for (const [rel, entry] of this.files.entries()) {
+        payload.files[rel] = {
+          sig: entry.sig,
+          date: entry.date,
+          kind: entry.kind,
+          blocks: entry.blocks.map((b) => ({ t: b.title, x: b.text, v: b.vec.map((x) => Number(x.toFixed(VEC_DECIMALS))) })),
+        }
+      }
+      mkdirSync(dirname(this.cachePath), { recursive: true })
+      const tmp = `${this.cachePath}.tmp-${Date.now()}`
+      writeFileSync(tmp, JSON.stringify(payload))
+      renameSync(tmp, this.cachePath)
+      this.cacheDirty = false
+    } catch (error) {
+      console.warn(`dsh-memory: vector cache write failed (${error?.message ?? String(error)})`)
+    }
+  }
+
   /**
    * Re-embed every entry whose text signature changed; drop files that
-   * disappeared. Concurrent calls share one refresh (a burst of searches
-   * embeds once). Throws when the embedding service is unreachable.
+   * disappeared (window expiry, deletion, rename — query() always refreshes
+   * against the current walk before scoring, so the live index is the
+   * cache∩walk intersection). Concurrent calls share one refresh (a burst of
+   * searches embeds once). Throws when the embedding service is unreachable;
+   * persistence happens only after a fully successful pass.
    * @param {Array<{rel: string, date: string, kind: string, text: string}>} entries
    */
   async refresh(entries) {
@@ -142,8 +223,13 @@ export class VectorIndex {
       const vectors = await this.client.embed(sections.map((s) => s.text))
       const blocks = sections.map((s, i) => ({ title: s.title, text: s.text, vec: vectors[i] }))
       this.files.set(entry.rel, { sig, date: entry.date, kind: entry.kind, blocks })
+      this.cacheDirty = true
     }
-    for (const rel of stale) this.files.delete(rel)
+    for (const rel of stale) {
+      this.files.delete(rel)
+      this.cacheDirty = true
+    }
+    this.saveCache()
   }
 
   /**

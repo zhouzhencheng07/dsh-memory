@@ -72,6 +72,7 @@ const DIARY_TEXT = '# pnpm profile\n\nThe dsh plugin profile lives under profile
 const TOPIC_TEXT = '# windows-env\n\nDSH_HOME defaults to the production root; always inline-set the env var before profile operations.\n'
 const SLUG_A = '--C--proj-a--'
 const SLUG_B = '--C--proj-b--'
+const SLUG_C = '--C--proj-c--'
 
 // --- 2. home resolution ----------------------------------------------------------
 await check('no AGENT_MEMORY_HOME → instructive refusal, no default library, no flag escape hatch', async () => {
@@ -187,20 +188,24 @@ await check('search returns whole blocks with absolute paths + breadcrumb', with
 }))
 
 await check('long-term seat + composition hints: the seat APPENDS and flips the branch', withHome(async (home) => {
-  seedDiary(home, 1, SLUG_A, DIARY_TEXT)
+  // IDF-aware corpus: both diaries match the query on two terms (df 3/4),
+  // the topic block matches the same two terms but is longer (ranks 3rd),
+  // and a 4th block matches nothing — so the regular cut holds both diaries
+  // and the topic block rides the append seat.
+  seedDiary(home, 0, SLUG_A, '# near\n\npnpm profile usage here plus filler filler filler.')
+  seedDiary(home, 1, SLUG_B, '# cache-diary\n\npnpm profile behavior plus filler filler filler.')
+  seedDiary(home, 2, SLUG_C, '# other\n\nunrelated filler words here plus more filler.')
   // no topic file yet → no long-term block anywhere → file-new hint
   const fresh = await run(['search', '--keywords', 'pnpm profile'])
   assert.match(fresh, /proved worth keeping long term, file it into topics\/<topic>\.md/)
   assert.ok(!/windows-env/.test(fresh))
-  seedTopic(home, 'windows-env', TOPIC_TEXT)
-  // the long-term block misses the regular cut but rides the append seat —
-  // and a seated long-term block FLIPS the hint branch (plugin parity)
+  seedTopic(home, 'windows-env', '# windows-env\n\npnpm profile guidance for the whole team plus filler filler filler filler. dshhomeunique')
   const seated = await run(['search', '--keywords', 'pnpm profile'])
   assert.ok(seated.includes('windows-env'), 'seated long-term block is appended')
   assert.match(seated, /authoritative \(never windowed\)/)
   assert.ok(!/proved worth keeping long term, file it into/.test(seated), 'hint branches are exclusive')
   // long-term block making the regular cut: same authoritative branch
-  const regular = await run(['search', '--keywords', 'dsh_home production'])
+  const regular = await run(['search', '--keywords', 'dshhomeunique'])
   assert.match(regular, /windows-env/)
   assert.match(regular, /authoritative \(never windowed\)/)
 }))
@@ -216,9 +221,11 @@ await check('45-day diary window: aged-out diaries leave the corpus, topic files
   assert.ok(home.length > 0)
 }))
 
-await check('empty results: no hint attached', withHome(async () => {
+await check('empty results: no hint attached, absent keyword reported', withHome(async () => {
   const out = await run(['search', '--keywords', 'nothing-matches-this'])
-  assert.equal(out, 'No memory found.')
+  assert.ok(out.includes('No memory found.'))
+  assert.match(out, /no note contains "nothing-matches-this"/)
+  assert.ok(!/authoritative|file it into/.test(out), 'empty results carry no promotion hint')
 }))
 
 await check('keyword overflow is reported in a notice line', withHome(async (home) => {

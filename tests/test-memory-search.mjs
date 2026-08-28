@@ -6,12 +6,13 @@
 // search.js is dependency-free, so no stub loader is needed.
 // Usage: node tests/test-memory-search.mjs
 import { strict as assert } from 'node:assert'
-import { readdirSync, readFileSync } from 'node:fs'
+import { readdirSync, readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   searchMemory,
   parseKeywords,
   looseNormalize,
+  occurrenceCount,
   MAX_PRIMARY_KEYWORDS,
   MAX_SECONDARY_KEYWORDS,
   PRIMARY_WEIGHT,
@@ -138,8 +139,21 @@ check('MIN_SCORE keeps a primary hit even at the recency floor', () => {
 })
 
 // --- real-corpus acceptance: the exact query that missed on 2026-08-22 -------
+// The library root follows AGENT_MEMORY_HOME (cross-agent sharing), so the
+// real corpus is located dynamically; when no library is found the check is
+// SKIPPED (the acceptance run needs a real library, not a synthetic one).
 check('REAL corpus: positional-keyword query still surfaces the appendd fix-record block', () => {
-  const dir = join('D:', '\\agent\\.dsh\\dsh-memory', '2026-08-22')
+  const candidates = [
+    ...(process.env.AGENT_MEMORY_HOME ? [process.env.AGENT_MEMORY_HOME] : []),
+    join('D:', '\\agent\\memory'),
+    join('D:', '\\agent\\.dsh\\dsh-memory'),
+  ]
+  const root = candidates.find((c) => existsSync(join(c, '2026-08-22')))
+  if (!root) {
+    console.log('     → SKIPPED: no real memory library found (set AGENT_MEMORY_HOME)')
+    return
+  }
+  const dir = join(root, '2026-08-22')
   const entries = readdirSync(dir).filter((f) => f.endsWith('.md')).map((f) =>
     entry(f, readFileSync(join(dir, f), 'utf8'), '2026-08-22'),
   )
@@ -151,6 +165,51 @@ check('REAL corpus: positional-keyword query still surfaces the appendd fix-reco
   const target = hits.find((h) => h.rel.includes('待修 bug'))
   assert.ok(target, `expected the 待修 bug block in top hits, got:\n${hits.map((h) => h.rel).join('\n')}`)
   console.log(`     → ranked #${hits.indexOf(target) + 1}, score ${target.score}`)
+})
+
+// --- IDF term weighting (2026-08-29) ------------------------------------------
+check('IDF: a term in EVERY block cannot carry a hit past MIN_SCORE', () => {
+  // 「配置」 sits in both blocks (df=N): its idf collapses toward 0, so a block
+  // matching only it falls under the floor while the rare-term block ranks
+  const entries = [
+    entry('a.md', '# 部署\n\n配置 完成。uniquetoken7 在这里。'),
+    entry('b.md', '# 记录\n\n配置 已同步，无别的信号词。'),
+  ]
+  assert.deepEqual(searchMemory(entries, ['配置'], [], 5), [], 'generic-only block is dropped')
+  const mixed = searchMemory(entries, ['uniquetoken7'], [], 5)
+  assert.equal(mixed.length, 1, 'the rare-term hit still surfaces')
+})
+
+check('IDF: df=1 keyword keeps the legacy weight (ranking unaffected for rare terms)', () => {
+  const one = [ltEntry('# 同文\n\nalpha beta')]
+  const asPrimary = searchMemory(one, ['alpha'], [], 5)[0].score
+  // df=1 in a 1-block corpus → idfWeight=1.0 → legacy score 3×1×0.5=1.5
+  assert.ok(Math.abs(asPrimary - 1.5) < 1e-9, `df=1 primary should stay 1.5, got ${asPrimary}`)
+})
+
+check('keyword health is reported through the optional notices array', () => {
+  const entries = [
+    entry('a.md', '# 甲\n\n共享词 加上 uniqone。'),
+    entry('b.md', '# 乙\n\n共享词 加上 uniqtwo。'),
+  ]
+  const notices = []
+  searchMemory(entries, ['uniqone', 'ghostword'], ['共享词'], 5, notices)
+  assert.ok(notices.some((n) => n.includes('ghostword') && /no note contains/.test(n)), `got: ${notices}`)
+  assert.ok(notices.some((n) => n.includes('共享词') && /every note/.test(n)), `got: ${notices}`)
+  assert.ok(!notices.some((n) => n.includes('uniqone')), 'a healthy df=1 keyword stays silent')
+})
+
+// --- ASCII word boundaries (2026-08-29) ---------------------------------------
+check('boundary matching: log no longer matches catalog/login; CJK substring unchanged', () => {
+  assert.equal(occurrenceCount('catalog login logo', 'log'), 0)
+  assert.equal(occurrenceCount('log in the log file', 'log'), 2)
+  assert.equal(occurrenceCount('记忆库里的记忆', '记忆'), 2, 'CJK keeps substring semantics')
+  assert.equal(occurrenceCount('v0.2.2 was shipped', '0.2.2'), 1, 'digit-bearing needles stay substring')
+})
+
+check('search-level: an alphabetic keyword glued into another word is not a hit', () => {
+  const entries = [entry('x.md', '# 目录\n\n这个 catalog 里什么都没有。')]
+  assert.deepEqual(searchMemory(entries, ['log'], [], 5), [])
 })
 
 console.log(`\n${passed} checks passed`)

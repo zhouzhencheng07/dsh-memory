@@ -239,7 +239,10 @@ function cmdSearch(root, flags) {
   }
   const limit = Math.min(Math.max(Math.floor(Number(flags.limit ?? DEFAULT_LIMIT)) || DEFAULT_LIMIT, 1), MAX_LIMIT)
   const windowDays = Math.max(0, Math.floor(Number(flags.days ?? DEFAULT_WINDOW_DAYS) || 0))
-  const ranked = searchMemory(walkMemory(root, windowDays), kw.primary, kw.secondary, limit * 3)
+  // keyword health (absent / too-generic terms) is reported back so the
+  // caller can reword its query
+  const stats = []
+  const ranked = searchMemory(walkMemory(root, windowDays), kw.primary, kw.secondary, limit * 3, stats)
   const isLongterm = (h) => isLongtermRel(h?.rel)
   const hits = ranked.slice(0, limit)
   // Long-term append seat (same as the plugin): when no long-term block made
@@ -250,7 +253,8 @@ function cmdSearch(root, flags) {
     if (reserve) hits.push(reserve)
   }
   let out = formatHits(hits, root)
-  if (kw.notices.length > 0) out = `${kw.notices.join('; ')}\n${out}`
+  const allNotices = [...kw.notices, ...stats]
+  if (allNotices.length > 0) out = `${allNotices.join('; ')}\n${out}`
   // Composition-driven long-term guidance (same branch as the plugin's
   // memory_search; "the memory tool" becomes this CLI's verbs).
   if (hits.length > 0) {

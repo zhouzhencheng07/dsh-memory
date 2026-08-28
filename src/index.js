@@ -148,7 +148,7 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
     name: 'memory_search',
     description:
       'Search the cross-session memory library by literal keyword matching with partial credit per matched keyword. ' +
-      '`keywords` holds up to 7 space-separated terms, most essential FIRST — earlier terms weigh more; pick words the notes actually contain, not synonyms. ' +
+      '`keywords` holds up to 7 space-separated terms, most essential FIRST — earlier terms weigh more; distinctive (rare) terms weigh more than generic ones, so pick words the notes actually contain, not synonyms. ' +
       'Returns block-level hits whose snippet is the whole block; low-scoring hits are dropped. ' +
       'When a hit is not enough on its own, open its source file and continue from the matching block.',
     parameters: {
@@ -167,9 +167,11 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
       const windowDays = Math.max(0, Math.floor(Number(getConfig().dailyWindowDays) || 0))
       const entries = walkMemory(windowDays)
       // gather a candidate pool several times the result window so fusion and
-      // the long-term append seat have room to rank
+      // the long-term append seat have room to rank; keyword health (absent /
+      // too-generic terms) is reported back so the model can reword
+      const stats = []
       const poolSize = Math.min(limit * 3, MAX_LIMIT * 3)
-      const sub = searchMemory(entries, kw.primary, kw.secondary, poolSize)
+      const sub = searchMemory(entries, kw.primary, kw.secondary, poolSize, stats)
       const index = getVectorIndex()
       let fused = null
       if (index !== null) {
@@ -199,9 +201,10 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
       // $DSH_HOME/dsh-memory, so hits must be directly usable with the
       // memory tool's topic targeting or its read output
       let out = formatHits(hits, memoryRoot())
-      // tell the calling model when its input was trimmed, so the next call
-      // respects the cap (keywords ≤ 7)
-      if (kw.notices.length > 0) out = `${kw.notices.join('; ')}\n${out}`
+      // tell the calling model when its input was trimmed, or when a keyword
+      // matched nothing / matched everything, so the next call rewords
+      const allNotices = [...kw.notices, ...stats]
+      if (allNotices.length > 0) out = `${allNotices.join('; ')}\n${out}`
       // Long-term guidance is COMPOSITION-DRIVEN (2026-08-29, user decision):
       // promotion into the topic files happens at REUSE time — the result set
       // itself decides which hint the model sees, instead of the agent
@@ -456,7 +459,12 @@ export function apply(ctx) {
       vectorIndex.baseUrl !== runtime.embeddingBaseUrl ||
       vectorIndex.model !== runtime.embeddingModel
     ) {
-      vectorIndex = new VectorIndex(new EmbeddingClient(runtime.embeddingBaseUrl, runtime.embeddingModel))
+      vectorIndex = new VectorIndex(new EmbeddingClient(runtime.embeddingBaseUrl, runtime.embeddingModel), {
+        // persisted signature-keyed vector cache next to the corpus: kills the
+        // full-corpus rebuild on the first search after a dsh restart (the
+        // cache file sits at the memory root, invisible to walkMemory)
+        cachePath: join(memoryRoot(), '.vector-cache.json'),
+      })
       vectorIndex.baseUrl = runtime.embeddingBaseUrl
       vectorIndex.model = runtime.embeddingModel
     }

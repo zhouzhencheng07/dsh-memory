@@ -66,7 +66,7 @@ function seed(file, text) {
   writeFileSync(file, text, 'utf8')
 }
 
-const { memory } = boot()
+const { memory, search: searchTool } = boot()
 
 // --- 无参 = 读今日笔记 ---------------------------------------------------------
 await check('不存在时：ABSENT + 建file指引 + 现有 topic 提示，零写盘', async () => {
@@ -260,10 +260,13 @@ await check('跨会话 CAS：A 读 → B 读后写 → A 编辑被拒', async ()
 })
 
 // --- 工具面 ---------------------------------------------------------------------
-await check('工具面：描述中性含机制、参数齐全', async () => {
+await check('工具面：描述含机制与组织规则（时机规则外置 AGENTS.md）、参数齐全', async () => {
   assert.equal(name, 'dsh-memory')
   assert.ok(!memory.description.includes('必须'), '工具描述不得出现"必须"')
   assert.ok(/Read before modify/.test(memory.description), '描述含先读后改机制说明')
+  assert.ok(/organize under # headings/i.test(memory.description), '组织规则在工具层（2026-08-29 分层：AGENTS.md 只写时机）')
+  assert.ok(/never play-by-play/i.test(memory.description), '内容取舍规则在工具层')
+  assert.ok(/treat them as authoritative/.test(searchTool.description), '检索后固化/修正指引在 memory_search 描述里')
   assert.deepEqual(
     Object.keys(memory.parameters).sort(),
     ['content', 'mode', 'new_string', 'old_string', 'replace_all', 'topic'],

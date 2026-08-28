@@ -8,25 +8,28 @@ Two model-side tools make up the whole mechanism: the **`memory` file tool**
 (read/write/edit modes, mirroring the native file-tool contract, with its
 read/write surface locked to this plugin's data root `$DSH_HOME/dsh-memory`)
 maintains the notes, and the **`memory_search` tool** retrieves them with
-**block-level search** (optional vector fusion, per-day recency decay).
-Capture timing and writing etiquette are NOT in the plugin — they live in the
-user's global AGENTS.md (paste-ready rule templates at the end); the plugin
-ships pure mechanism. Bundle plugin form (`dsh.bundle`) — 0 patches, **zero
-npm dependencies, zero build step**; `@deepseek-ai/*` resolves through dsh's
-flat module fallback, so the runtime shares one package instance.
+**block-level search** (optional vector fusion, per-day recency decay). The
+prompting is layered: capture **timing** lives in the user's global AGENTS.md
+(paste-ready template at the end, timing only), while the **organization
+rules** (what to record, `#` heading structure, merging, in-place correction)
+ride every request inside the tool descriptions. Bundle plugin form
+(`dsh.bundle`) — 0 patches, **zero npm dependencies, zero build step**;
+`@deepseek-ai/*` resolves through dsh's flat module fallback, so the runtime
+shares one package instance.
 
 ## Features
 
 | Feature | Description |
 |---|---|
-| **memory tool (three-mode file tool, 2026-08-28)** | **No arguments = read today's note**: returns the full text of this workspace's note for today (ABSENT — listing existing long-term topics — when there is none, zero disk writes); `mode:"write"` + `content` creates or fully replaces; `mode:"edit"` + `old_string`/`new_string` (+`replace_all`) does a unique literal replace; the optional `topic` parameter targets a long-term library file `memory/<topic>.md`. **Observation guard mirrors the native tools**: per-session present/absent + version records — write refused when the file exists but was not read this session (createIfAbsent), write/edit refused when the file changed since that read (CAS "read it again"), edit refused when unread (FS_NOT_OBSERVED), old_string refused on multiple matches (FS_AMBIGUOUS_EDIT); atomic tmp+rename writes. **The plugin writes its own data root directly** (trusted node:fs writes; paths are tool-derived or whitelist-validated, the model only supplies content) — bypassing the sandbox fence built into the fs backend (its per-write manual escalation is unusable for automatic capture), so **capture works under every permission mode, workspace-write included** |
-| **memory_search tool** | Heading-aware block-level retrieval (any heading splits a block, breadcrumbs included), **single-field positional keyword scoring** (2026-08-25): ONE `keywords` parameter holding up to 7 space-separated terms — the **first 3 at high weight** (×3 each hit), the next 4 at low weight (×1 each) — partial credit per matched keyword, no hard AND gate; a **minimum-score floor `MIN_SCORE=0.5`**; formatting-tolerant matching, occurrence counts normalized by block length, **per-day decay** (30-day half-life, floor 0.4); snippets return whole blocks (≤1000 chars); **every hit carries its ABSOLUTE path**. Pure retrieval (2026-08-28): no promotion hint is appended anymore |
+| **memory tool (three-mode file tool, 2026-08-28)** | **No arguments = read today's note**: returns the full text of this workspace's note for today (ABSENT — listing existing long-term topics — when there is none, zero disk writes); `mode:"write"` + `content` creates or fully replaces; `mode:"edit"` + `old_string`/`new_string` (+`replace_all`) does a unique literal replace; the optional `topic` parameter targets a long-term library file `memory/<topic>.md`. **Observation guard mirrors the native tools**: per-session present/absent + version records — write refused when the file exists but was not read this session (createIfAbsent), write/edit refused when the file changed since that read (CAS "read it again"), edit refused when unread (FS_NOT_OBSERVED), old_string refused on multiple matches (FS_AMBIGUOUS_EDIT); atomic tmp+rename writes. **The plugin writes its own data root directly** (trusted node:fs writes; paths are tool-derived or whitelist-validated, the model only supplies content) — bypassing the sandbox fence built into the fs backend (its per-write manual escalation is unusable for automatic capture), so **capture works under every permission mode, workspace-write included**. **Organization rules live in the description**: record experience, not play-by-play; `#` headings; merge related topics; correct outdated statements in place — sent with the tool schema on every request |
+| **memory_search tool** | Heading-aware block-level retrieval (any heading splits a block, breadcrumbs included), **single-field positional keyword scoring** (2026-08-25): ONE `keywords` parameter holding up to 7 space-separated terms — the **first 3 at high weight** (×3 each hit), the next 4 at low weight (×1 each) — partial credit per matched keyword, no hard AND gate; a **minimum-score floor `MIN_SCORE=0.5`**; formatting-tolerant matching, occurrence counts normalized by block length, **per-day decay** (30-day half-life, floor 0.4); snippets return whole blocks (≤1000 chars); **every hit carries its ABSOLUTE path**. Pure retrieval, no appended output (2026-08-28); the post-retrieval promotion/correction guidance lives in the **tool description** (2026-08-29) |
 | **Two-layer library** | Diary layer `YYYY-MM-DD/` (ephemeral, **hard window** `dailyWindowDays` default 90 days — aged notes leave the searchable corpus but stay on disk; 0 = unlimited) + long-term layer `memory/<topic>.md` (**free topic files**, 2026-08-28: one topic per file, never decays, never windowed; the search layer supports this with zero changes). Division of labor: **experience that still holds in another project goes to the long-term layer** (environment/tooling lessons, collaboration preferences, general patterns); play-by-play events go to the diary; **must-follow rules belong in AGENTS.md, not memory**; durable project-specific facts graduate into AGENTS.md or age out with the diary window (an accepted trade-off that forces curation). No hit counters, zero state files |
 | **Vector fusion (optional)** | With an Ollama-compatible embedding service configured, upgrades automatically to keyword + vector RRF fusion (k=60); falls back to pure keyword matching when the service is down — `memory_search` never fails because of vectors |
 | **Config card** | Settings → Plugins → Plugin config → Memory; hot-reloads on save (persisted to settings.yaml, no restart) |
 
-No commands — capture timing and etiquette live in the user's global AGENTS.md;
-retrieval goes through the `memory_search` tool.
+No commands — capture **timing** lives in the user's global AGENTS.md
+(organization rules live in the tool descriptions); retrieval goes through
+the `memory_search` tool.
 
 ## Storage layout
 
@@ -84,8 +87,8 @@ commits).
   the tool layer's only widening path needs per-write manual approval; a
   plugin writing its own data root is trusted host behavior, with
   path derivation/whitelisting keeping the write surface bounded). **No host
-  hooks, no per-turn reminder** (etiquette externalized to AGENTS.md since
-  2026-08-28)
+  hooks, no per-turn reminder** (prompt layering since 2026-08-29: timing
+  rules in AGENTS.md, organization rules in the tool descriptions)
 - `src/search.js`: any heading (`#`–`######`) is a chunk boundary and
   subsections become standalone blocks with ancestor breadcrumbs;
   **single-field positional keyword scoring** — one `keywords` string split on
@@ -131,39 +134,31 @@ memory topic="windows-env" mode="write" content="# Windows environment lessons .
 memory topic="windows-env" mode="edit" old_string="pnpm dual instance" new_string="pnpm dual instance (avoid via --allow-scripts since 2026-08)"
 ```
 
-## AGENTS.md rule templates (paste manually)
+## AGENTS.md timing template (paste manually)
 
 The plugin ships no capture reminder, and there is **no mechanism to write
-rules into your AGENTS.md for you** — capture etiquette is driven entirely by
-your global AGENTS.md (user scope, effective across projects). Paste the
-templates you need:
-
-**Auto-capture rules** (per-turn capture → today's note):
-
-```markdown
-## Auto memory (dsh-memory plugin)
-
-- At the end of a turn that produced something worth keeping across sessions,
-  use the `memory` tool — read first: no args reads today's note; create with
-  mode:"write" when absent; modify in place with mode:"edit" when present.
-- Record experience, not play-by-play: decisions and reasons, pitfalls and
-  fixes, reusable commands/processes, state changes. Organize under # headings,
-  merge related topics, correct outdated statements in place.
-```
-
-**Long-term memory rules** (cross-project evergreen → memory/&lt;topic&gt;.md):
+rules into your AGENTS.md for you**. Your AGENTS.md only adds the TIMING
+layer — when to reach for which tool; the organization rules (what to record
+and how to structure it) already ride every request inside the
+`memory`/`memory_search` tool descriptions. Paste this into your global
+AGENTS.md (user scope, effective across projects):
 
 ```markdown
-## Long-term memory (dsh-memory plugin)
+# Memory mechanism
 
-- Experience that still holds in another project (environment/tooling lessons,
-  my collaboration preferences, general patterns) does NOT go into today's
-  note — write it into long-term topic files: the memory tool with a topic
-  parameter (short English kebab-case names, e.g. windows-env).
-- Search with memory_search (up to 7 terms, most essential first; the result
-  count is config-locked); when a long-term topic block is among the hits
-  treat it as authoritative, fix stale statements in place, merge obvious
-  duplicates.
+## Daily memory
+
+- At the end of a turn that produced something worth keeping across sessions
+  → use the memory tool: no args reads today's note, then mode:"write"
+  (absent — create) or mode:"edit" (present — modify in place).
+
+## Long-term memory
+
+- When experience emerges that still holds in another project
+  (environment/tooling lessons, collaboration preferences, general patterns)
+  → the memory tool with a topic parameter, writing the long-term topic file
+  memory/<topic>.md.
+- When past experience or an old detail is needed → memory_search.
 ```
 
 ## Configuration

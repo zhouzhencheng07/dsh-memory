@@ -6,11 +6,13 @@
 //
 // Design (agreed with the user, 2026-08-16..28):
 //   - memory = reusable experience reference (decisions, pitfalls, ideas),
-//     NOT a project archive. Capture etiquette and timing are NOT enforced by
-//     the plugin (2026-08-28, user decision): the per-turn reminder and its
-//     `autoMemory` config were REMOVED — the rules live in the user's global
-//     AGENTS.md, and both tools below are pure mechanism with neutral
-//     descriptions.
+//     NOT a project archive. The per-turn reminder and its `autoMemory`
+//     config were REMOVED (2026-08-28, user decision). Prompt layering since
+//     2026-08-29: TIMING rules (when to capture, when to search) live in the
+//     user's global AGENTS.md, while the ORGANIZATION rules (what to record,
+//     # heading structure, merging, in-place correction) live in the tool
+//     descriptions below — they ride every request with the tool schema, so
+//     AGENTS.md only has to answer "when".
 //   - retrieval: memory_search over the corpus (block-level; POSITIONAL
 //     keyword scoring 2026-08-25 — ONE `keywords` parameter of up to 7
 //     terms, first 3 ×3 then next 4 ×1, partial credit per matched keyword,
@@ -125,7 +127,8 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
       'Search the cross-session memory library by literal keyword matching with partial credit per matched keyword. ' +
       '`keywords` holds up to 7 space-separated terms, most essential FIRST — earlier terms weigh more; pick words the notes actually contain, not synonyms. ' +
       'Returns block-level hits whose snippet is the whole block; low-scoring hits are dropped. ' +
-      'When a hit is not enough on its own, open its source file and continue from the matching block.',
+      'When a hit is not enough on its own, open its source file and continue from the matching block. ' +
+      'When hits include memory/ topic blocks, treat them as authoritative and correct outdated statements in place; file lasting facts you uncovered into the matching topic file via the memory tool.',
     parameters: {
       keywords: { type: 'string', required: true, description: 'Up to 7 space-separated terms, most essential first — earlier terms weigh more' },
     },
@@ -340,7 +343,10 @@ function memoryFileTool() {
       'mode:"write" creates or fully replaces a file with content (refused when the file exists but was not read this session, or changed since that read). ' +
       'mode:"edit" replaces a literal old_string with new_string (read the file first; old_string must appear exactly once unless replace_all). ' +
       "The optional topic parameter targets the long-term library file memory/<topic>.md instead of today's note. " +
-      'Read before modify, exactly like the native file tools.',
+      'Read before modify, exactly like the native file tools. ' +
+      'What to record: reusable experience only, never play-by-play — decisions and their reasons, pitfalls and fixes, reusable commands and processes, state changes; ' +
+      'organize under # headings, merge related topics, keep each block concise, and correct outdated statements in place. ' +
+      'Topic files hold cross-project evergreen experience (environment/tooling lessons, collaboration preferences, general patterns): one topic per file, update the matching file in place and merge near-duplicates instead of spawning parallel ones.',
     parameters: {
       mode: { type: 'string', description: '"read" (default), "write" or "edit"' },
       topic: { type: 'string', description: 'Target the long-term topic file memory/<topic>.md instead of today\'s note (short kebab-case names, e.g. "windows-env")' },
@@ -424,8 +430,8 @@ export function apply(ctx) {
 
   // Model tools: memory_search (pure retrieval) + the three-mode `memory`
   // file tool (native-shaped read/write/edit confined to the plugin data
-  // root). Capture etiquette lives in the user's AGENTS.md, not here — no
-  // per-turn reminder, no host hooks.
+  // root). Timing rules live in the user's AGENTS.md; organization rules in
+  // the tool descriptions — no per-turn reminder, no host hooks.
   const tools = [
     memorySearchTool(ctx, getConfig, getVectorIndex),
     memoryFileTool(),

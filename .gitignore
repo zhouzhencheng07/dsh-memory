@@ -6,3 +6,5 @@ node_modules/
 AGENTS.md
 # 本地开发安装副产物（插件零依赖，无 package.json dependencies，lockfile 无发布意义）
 pnpm-lock.yaml.zcode/
+
+.zcode/

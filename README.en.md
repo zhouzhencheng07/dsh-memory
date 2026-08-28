@@ -19,6 +19,13 @@ Bundle plugin form (`dsh.bundle`) — 0 patches, **zero npm dependencies, zero
 build step**; `@deepseek-ai/*` resolves through dsh's flat module fallback,
 so the runtime shares one package instance.
 
+> ⚠️ **Personal project — use with caution.** This is a casually designed,
+> personal memory system. The storage layout, tool interface, and config
+> options may change frequently and WITHOUT compatibility guarantees
+> (breaking changes are the norm). Check the commit history before upgrading,
+> and back up your memory files under `$DSH_HOME/dsh-memory/` if they matter
+> to you.
+
 ## Features
 
 | Feature | Description |

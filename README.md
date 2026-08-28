@@ -6,6 +6,8 @@
 
 主 agent 每轮判定是否有值得跨会话保留的内容：**每轮 system prompt 提醒**（"When this turn produced something worth keeping across sessions, you MUST use the `memory` tool."——`autoMemory: false` 可关）把时机指给 **`memory` 文件工具**（read/write/edit 三模式，语义镜像原生文件工具，读写面锁定在插件数据根 `$DSH_HOME/dsh-memory` 内；描述承载使用机制与组织规则）；**`memory_search` 工具**对记忆做**块级检索**（可选向量融合、按日衰减），**长期层的写入跟随检索结果的组成指引**——被搜到才说明值得长存，不在捕获时预判。官方 bundle 插件形态（`dsh.bundle`），0 patch、**零 npm 依赖、零构建**——`@deepseek-ai/*` 由 dsh 运行时扁平 fallback 提供，与运行实例共享同一份包。
 
+> ⚠️ **个人项目，谨慎使用。** 这是一套为个人工作流随手设计的记忆系统，存储布局、工具接口与配置项都可能**频繁调整且不含兼容性保证**（破坏性改动是常态）。升级前请先看提交记录；`$DSH_HOME/dsh-memory/` 下的记忆文件如有价值请自行备份。
+
 ## 能力
 
 | 能力 | 说明 |

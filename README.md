@@ -4,7 +4,7 @@
 
 面向 DeepSeek Harness (dsh) 的**跨会话记忆插件**。
 
-两个模型侧工具构成全部机制：**`memory` 文件工具**（read/write/edit 三模式，语义镜像原生文件工具，读写面锁定在本插件数据根 `$DSH_HOME/dsh-memory` 内）负责记忆的读写维护；**`memory_search` 工具**对记忆做**块级检索**（可选向量融合、按日衰减）。捕获时机与写作礼仪**不在插件里**——由用户写进全局 AGENTS.md（见文末建议规则块），插件只提供纯机制。官方 bundle 插件形态（`dsh.bundle`），0 patch、**零 npm 依赖、零构建**——`@deepseek-ai/*` 由 dsh 运行时扁平 fallback 提供，与运行实例共享同一份包。
+两个模型侧工具构成全部机制：**`memory` 文件工具**（read/write/edit 三模式，语义镜像原生文件工具，读写面锁定在本插件数据根 `$DSH_HOME/dsh-memory` 内）负责记忆的读写维护；**`memory_search` 工具**对记忆做**块级检索**（可选向量融合、按日衰减）。捕获时机与写作礼仪**不在插件里**——由用户写进全局 AGENTS.md（文末有可粘贴的规则模板），插件只提供纯机制。官方 bundle 插件形态（`dsh.bundle`），0 patch、**零 npm 依赖、零构建**——`@deepseek-ai/*` 由 dsh 运行时扁平 fallback 提供，与运行实例共享同一份包。
 
 ## 能力
 
@@ -72,22 +72,31 @@ memory topic="windows-env" mode="write" content="# Windows 环境教训 ..."
 memory topic="windows-env" mode="edit" old_string="pnpm 双实例" new_string="pnpm 双实例（2026-08 起用 --allow-scripts 规避）"
 ```
 
-## 维护规则建议（放进全局 AGENTS.md）
+## AGENTS.md 规则模板（手动粘贴）
 
-插件不带捕获提醒，把下面这类规则放进你的**全局 AGENTS.md**（用户级，跨项目生效）即可：
+插件不带捕获提醒，也**没有机制替你把规则写进 AGENTS.md**——捕获礼仪完全靠你的全局 AGENTS.md（用户级，跨项目生效）驱动，按需把下面的模板粘贴进去：
+
+**自动记忆规则**（每轮捕获 → 今日笔记）：
 
 ```markdown
-## 跨会话记忆（dsh-memory 插件）
+## 自动记忆（dsh-memory 插件）
 
 - 一轮工作结束时，若有值得跨会话保留的内容，必须用 `memory` 工具先读后写：
   无参调用读今日笔记；不存在用 mode:"write" 创建；存在用 mode:"edit" 就地修改。
 - 只记经验不记流水：决策及原因、踩坑与修复、可复用命令/流程、状态变化。
   `#` 标题组织主题，同类合并，过时表述就地修正。
-- 换个项目仍然成立的经验（环境/工具教训、我的协作偏好、通用模式）写进
-  长期主题文件：memory 工具带 topic 参数（短英文 kebab-case 名，如 windows-env）。
-- 必须遵守的规则不要写进记忆——提醒我把它加进本 AGENTS.md。
-- 用 memory_search 检索记忆（最多 7 个词，最重要的放最前）；命中长期主题块时
-  以它为准，发现过时就地修正，明显重复的合并。
+```
+
+**长期记忆规则**（跨项目长青 → memory/&lt;topic&gt;.md）：
+
+```markdown
+## 长期记忆（dsh-memory 插件）
+
+- 换个项目仍然成立的经验（环境/工具教训、我的协作偏好、通用模式）不写今日
+  笔记，写进长期主题文件：memory 工具带 topic 参数（短英文 kebab-case 主题名，
+  如 windows-env）。
+- 用 memory_search 检索记忆（最多 7 个词，最重要的放最前，返回条数由配置锁定）；
+  命中长期主题块时以它为准，发现过时就地修正，明显重复的合并。
 ```
 
 ## 配置

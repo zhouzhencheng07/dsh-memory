@@ -10,7 +10,7 @@ read/write surface locked to this plugin's data root `$DSH_HOME/dsh-memory`)
 maintains the notes, and the **`memory_search` tool** retrieves them with
 **block-level search** (optional vector fusion, per-day recency decay).
 Capture timing and writing etiquette are NOT in the plugin — they live in the
-user's global AGENTS.md (see the suggested rules block at the end); the plugin
+user's global AGENTS.md (paste-ready rule templates at the end); the plugin
 ships pure mechanism. Bundle plugin form (`dsh.bundle`) — 0 patches, **zero
 npm dependencies, zero build step**; `@deepseek-ai/*` resolves through dsh's
 flat module fallback, so the runtime shares one package instance.
@@ -131,13 +131,17 @@ memory topic="windows-env" mode="write" content="# Windows environment lessons .
 memory topic="windows-env" mode="edit" old_string="pnpm dual instance" new_string="pnpm dual instance (avoid via --allow-scripts since 2026-08)"
 ```
 
-## Suggested rules (paste into your global AGENTS.md)
+## AGENTS.md rule templates (paste manually)
 
-The plugin ships no capture reminder; put rules like this into your **global
-AGENTS.md** (user scope, effective across projects):
+The plugin ships no capture reminder, and there is **no mechanism to write
+rules into your AGENTS.md for you** — capture etiquette is driven entirely by
+your global AGENTS.md (user scope, effective across projects). Paste the
+templates you need:
+
+**Auto-capture rules** (per-turn capture → today's note):
 
 ```markdown
-## Cross-session memory (dsh-memory plugin)
+## Auto memory (dsh-memory plugin)
 
 - At the end of a turn that produced something worth keeping across sessions,
   use the `memory` tool — read first: no args reads today's note; create with
@@ -145,15 +149,21 @@ AGENTS.md** (user scope, effective across projects):
 - Record experience, not play-by-play: decisions and reasons, pitfalls and
   fixes, reusable commands/processes, state changes. Organize under # headings,
   merge related topics, correct outdated statements in place.
+```
+
+**Long-term memory rules** (cross-project evergreen → memory/&lt;topic&gt;.md):
+
+```markdown
+## Long-term memory (dsh-memory plugin)
+
 - Experience that still holds in another project (environment/tooling lessons,
-  my collaboration preferences, general patterns) goes into long-term topic
-  files: the memory tool with a topic parameter (short English kebab-case
-  names, e.g. windows-env).
-- Do not put must-follow rules into memory — tell me to add them to this
-  AGENTS.md instead.
-- Search with memory_search (up to 7 terms, most essential first); when a
-  long-term topic block is among the hits treat it as authoritative, fix stale
-  statements in place, merge obvious duplicates.
+  my collaboration preferences, general patterns) does NOT go into today's
+  note — write it into long-term topic files: the memory tool with a topic
+  parameter (short English kebab-case names, e.g. windows-env).
+- Search with memory_search (up to 7 terms, most essential first; the result
+  count is config-locked); when a long-term topic block is among the hits
+  treat it as authoritative, fix stale statements in place, merge obvious
+  duplicates.
 ```
 
 ## Configuration

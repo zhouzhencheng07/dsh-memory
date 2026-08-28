@@ -6,22 +6,31 @@
 //
 // Design (agreed with the user, 2026-08-16..28):
 //   - memory = reusable experience reference (decisions, pitfalls, ideas),
-//     NOT a project archive. The per-turn reminder and its `autoMemory`
-//     config were REMOVED (2026-08-28, user decision). Prompt layering since
-//     2026-08-29: TIMING rules (when to capture, when to search) live in the
-//     user's global AGENTS.md, while the ORGANIZATION rules (what to record,
-//     # heading structure, merging, in-place correction) live in the tool
-//     descriptions below — they ride every request with the tool schema, so
-//     AGENTS.md only has to answer "when".
+//     NOT a project archive. FINAL capture mechanism (2026-08-29, user
+//     decision — the 2026-08-28 AGENTS.md externalization experiment is
+//     ABANDONED: usage rules kept leaking into the user-curated file and it
+//     put a curation burden on the user): the per-turn reminder is BACK and
+//     stays SHORT — timing only ("worth keeping in this turn → MUST use the
+//     memory tool", gated on `autoMemory`, subagents excluded) — while usage
+//     mechanics AND organization rules (what to record, # headings, merge,
+//     in-place correction) live in the memory tool description. Long-term
+//     filing is NEVER pre-judged at capture: it follows the memory_search
+//     result composition (see the retrieval bullet).
 //   - retrieval: memory_search over the corpus (block-level; POSITIONAL
 //     keyword scoring 2026-08-25 — ONE `keywords` parameter of up to 7
 //     terms, first 3 ×3 then next 4 ×1, partial credit per matched keyword,
 //     no hard AND gate, MIN_SCORE floor — plus optional vector,
-//     recency-weighted). Pure retrieval since 2026-08-28: the old success
-//     hint pointing at the long-term file is gone. Long-term append seat
+//     recency-weighted). Long-term guidance is COMPOSITION-DRIVEN since
+//     2026-08-29: the output ends with a hint branched on the result
+//     composition — a memory/ block among the hits ⇒ treat as
+//     authoritative / fix in place / merge overlapping topic files; none ⇒
+//     file proved-lasting facts into memory/<topic>.md via the memory tool.
+//     Promotion happens at reuse time and is never pre-judged at capture
+//     (user decision: 被搜到才说明值得长存). Long-term append seat
 //     (2026-08-25): when no long-term block made the cut, the best-ranking
 //     one from the candidate pool is APPENDED after the regular results
-//     (config `longtermAppend`, additive — never evicts).
+//     (config `longtermAppend`, additive — never evicts); it also flips the
+//     hint branch.
 //   - long-term layer = FREE TOPIC FILES (2026-08-28, user decision):
 //     memory/<topic>.md, one file per topic. walkMemory already indexes any
 //     non-date subdirectory (never windowed, never decayed), so this needed
@@ -57,7 +66,7 @@
 //     whole sessions wastes context).
 //   - config: `dsh-memory:` section in $DSH_HOME/settings.yaml, hot-reloaded
 //     (searchLimit / dailyWindowDays / embeddingBaseUrl / embeddingModel /
-//     longtermAppend), see README.
+//     autoMemory / longtermAppend), see README.
 //
 // Plain ESM JavaScript on purpose. `@deepseek-ai/*` resolves at runtime
 // through Node's parent-walk (the harness installs them in the profile
@@ -100,6 +109,9 @@ export const Config = z.object({
   embeddingBaseUrl: z.string(),
   /** Embedding model served by embeddingBaseUrl. */
   embeddingModel: z.string().default('bge-m3'),
+  /** Per-turn system-prompt reminder ("use the memory tool when something is
+   * worth keeping"); off = no reminder, the memory tool remains usable. */
+  autoMemory: z.boolean().default(true),
   /** Long-term append seat (2026-08-25): when no memory/ block made the
    * results, the best-ranking one from the candidate pool is APPENDED after
    * them (never evicting a regular result). Off = pure top-N. */
@@ -127,8 +139,7 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
       'Search the cross-session memory library by literal keyword matching with partial credit per matched keyword. ' +
       '`keywords` holds up to 7 space-separated terms, most essential FIRST — earlier terms weigh more; pick words the notes actually contain, not synonyms. ' +
       'Returns block-level hits whose snippet is the whole block; low-scoring hits are dropped. ' +
-      'When a hit is not enough on its own, open its source file and continue from the matching block. ' +
-      'When hits include memory/ topic blocks, treat them as authoritative and correct outdated statements in place; file lasting facts you uncovered into the matching topic file via the memory tool.',
+      'When a hit is not enough on its own, open its source file and continue from the matching block.',
     parameters: {
       keywords: { type: 'string', required: true, description: 'Up to 7 space-separated terms, most essential first — earlier terms weigh more' },
     },
@@ -180,6 +191,17 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
       // tell the calling model when its input was trimmed, so the next call
       // respects the cap (keywords ≤ 7)
       if (kw.notices.length > 0) out = `${kw.notices.join('; ')}\n${out}`
+      // Long-term guidance is COMPOSITION-DRIVEN (2026-08-29, user decision):
+      // promotion into the topic files happens at REUSE time — the result set
+      // itself decides which hint the model sees, instead of the agent
+      // pre-judging at capture time (被搜到才说明值得长存). The append seat
+      // above participates: an appended long-term block flips the branch.
+      // Empty results carry no hint — there is nothing above to file.
+      if (hits.length > 0) {
+        out += hits.some(isLongterm)
+          ? '\nLong-term topic blocks above are authoritative (never windowed) — correct outdated statements in their topic files in place, and merge topic files that clearly overlap.'
+          : '\nIf a fact above proved worth keeping long term, file it via the memory tool into memory/<topic>.md — update the matching topic file, or start a new one when none matches.'
+      }
       return out
     },
   }
@@ -383,6 +405,7 @@ export function apply(ctx) {
     dailyWindowDays: 90,
     embeddingBaseUrl: '',
     embeddingModel: 'bge-m3',
+    autoMemory: true,
     longtermAppend: true,
   }
   const runtime = { ...DEFAULTS }
@@ -393,6 +416,7 @@ export function apply(ctx) {
       runtime.dailyWindowDays = Math.max(0, Math.floor(Number(source.dailyWindowDays) || 0))
       runtime.embeddingBaseUrl = source.embeddingBaseUrl ?? ''
       runtime.embeddingModel = source.embeddingModel || 'bge-m3'
+      runtime.autoMemory = source.autoMemory !== false
       runtime.longtermAppend = source.longtermAppend !== false
     }
     // setSource hands over a THUNK (() => scope.get()), not the value; it
@@ -428,10 +452,36 @@ export function apply(ctx) {
     return vectorIndex
   }
 
-  // Model tools: memory_search (pure retrieval) + the three-mode `memory`
-  // file tool (native-shaped read/write/edit confined to the plugin data
-  // root). Timing rules live in the user's AGENTS.md; organization rules in
-  // the tool descriptions — no per-turn reminder, no host hooks.
+  // Per-turn capture reminder (restored 2026-08-29, user decision — the
+  // AGENTS.md externalization experiment is abandoned): a runtime-context
+  // contribution assembled fresh on every model request. Deliberately SHORT
+  // — timing only ("worth keeping in this turn → you MUST use the memory
+  // tool"); the usage mechanics and organization rules live in the memory
+  // tool description, which rides the tool schema on every request. Gated on
+  // config autoMemory (empty text is dropped from the rendered snapshot) and
+  // on subagents (delegationDepth > 0): their memory belongs to the main
+  // agent's consolidation.
+  ctx.effect(() => {
+    const fiber = ctx.inject(['systemPrompt'], (scope) => {
+      scope.systemPrompt.context({
+        name: 'dsh-memory:auto',
+        order: 200,
+        text: (context) => {
+          if (!runtime.autoMemory) return ''
+          const session = context.agent?.session
+          if (!session?.id) return ''
+          if ((session.header?.delegationDepth ?? 0) > 0) return ''
+          return 'When this turn produced something worth keeping across sessions, you MUST use the `memory` tool.'
+        },
+      })
+    })
+    return () => fiber.dispose()
+  })
+
+  // Model tools: memory_search (retrieval with composition-driven long-term
+  // guidance) + the three-mode `memory` file tool (native-shaped
+  // read/write/edit confined to the plugin data root; description carries
+  // the usage mechanics and organization rules). No host hooks.
   const tools = [
     memorySearchTool(ctx, getConfig, getVectorIndex),
     memoryFileTool(),

@@ -46,6 +46,8 @@ window.__ModuleLoader__.load({
       embeddingBaseUrlHint: "Ollama base URL (e.g. http://localhost:11434) for vector search; blank disables it.",
       embeddingModel: "Embedding model",
       embeddingModelHint: "Embedding model name served by the base URL (e.g. bge-m3).",
+      autoMemory: "Per-turn memory reminder",
+      autoMemoryHint: "Remind every turn: when something is worth keeping across sessions, the memory tool must be used. Off = record only when asked.",
       longtermAppend: "Append long-term block",
       longtermAppendHint: "When no long-term (memory/) block is among the results, append the best-ranking one after them instead of leaving it out.",
       overridden: "Overridden",
@@ -72,6 +74,8 @@ window.__ModuleLoader__.load({
       embeddingBaseUrlHint: "Ollama 基地址（如 http://localhost:11434），用于向量检索；留空禁用。",
       embeddingModel: "嵌入模型",
       embeddingModelHint: "该服务上的嵌入模型名（如 bge-m3）。",
+      autoMemory: "每轮记忆提醒",
+      autoMemoryHint: "每轮提醒：本轮有值得跨会话保留的内容时必须使用 memory 工具；关闭后仅在明确要求时记录。",
       longtermAppend: "长期块追加返回",
       longtermAppendHint: "结果中没有长期层（memory/）块时，在其后追加一条排名最高的长期块（不挤占名额）。",
       overridden: "已覆盖",
@@ -142,6 +146,13 @@ window.__ModuleLoader__.load({
           return trimmed === "" ? { kind: "clear" } : { kind: "set", value: trimmed };
         }
       },
+      autoMemory: {
+        kind: "bool",
+        label: "autoMemory",
+        hint: "autoMemoryHint",
+        format: (value) => (value === false ? "false" : "true"),
+        parse: (text) => ({ kind: "set", value: text === "true" })
+      },
       longtermAppend: {
         kind: "bool",
         label: "longtermAppend",
@@ -149,13 +160,14 @@ window.__ModuleLoader__.load({
         format: (value) => (value === false ? "false" : "true"),
         parse: (text) => ({ kind: "set", value: text === "true" })
       }
-      // ── autoMemory removed 2026-08-28: the per-turn reminder was dropped
-      // with the etiquette-externalization decision — capture rules live in
-      // the user's global AGENTS.md, the tools stay pure mechanism. ──
+      // ── autoMemory restored again 2026-08-29: the per-turn reminder is the
+      // capture anchor (SHORT timing-only text; usage + organization rules in
+      // the memory tool description). The 2026-08-28 AGENTS.md externalization
+      // experiment was abandoned by user decision. ──
       // ── longtermAppend added 2026-08-25: the long-term append seat is now a
       // user-facing toggle (host default true = additive seat on). ──
     };
-    const FIELDS = ["searchLimit", "dailyWindowDays", "embeddingBaseUrl", "embeddingModel", "longtermAppend"];
+    const FIELDS = ["searchLimit", "dailyWindowDays", "embeddingBaseUrl", "embeddingModel", "autoMemory", "longtermAppend"];
 
     // ── theme-aligned styles (dsw alias tokens, as the official cards use) ──
     // (dropped during the migration rewrite once — the card then crashed every

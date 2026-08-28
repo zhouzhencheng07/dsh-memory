@@ -58,7 +58,8 @@ const rootPrefix = process.env.MEM_TEST_HOME.replaceAll('\\', '/') + '/dsh-memor
 const out1 = await search.execute({ keywords: 'alphaunique' })
 assert.match(out1, /今日流水/)
 assert.ok(out1.includes(`${rootPrefix}${dayStamp(0)}/note.md#`), `hits must carry ABSOLUTE file paths, got:\n${out1}`)
-assert.ok(!out1.includes('Note:'), 'pure retrieval: no success hint (2026-08-28)')
+assert.ok(out1.includes('file it via the memory tool into memory/<topic>.md'), 'daily-only hits end with the FILE-NEW promotion hint')
+assert.ok(!out1.includes('authoritative'), 'file-new branch excludes the authoritative branch')
 
 const outCap = await search.execute({ keywords: 'alphaunique extra1 extra2 extra3 extra4 extra5 extra6 extra7 extra8' })
 assert.match(outCap, /^keywords capped to 7 \(dropped: extra7, extra8\)/)
@@ -68,6 +69,7 @@ await assert.rejects(() => search.execute({ keywords: '   ' }), /no usable keywo
 // --- hard daily window (default 90) -------------------------------------------
 const outOld = await search.execute({ keywords: 'gammaunique' })
 assert.match(outOld, /^No memory found\.$/, '200-day-old diary is outside the 90-day window')
+assert.ok(!outOld.includes('memory/<topic>'), 'empty results carry no promotion hint')
 
 const outMid = await search.execute({ keywords: 'betaunique' })
 assert.match(outMid, /十天前/, '10-day-old diary stays inside the window')
@@ -75,6 +77,8 @@ assert.match(outMid, /十天前/, '10-day-old diary stays inside the window')
 // --- long-term participation: first place is already long-term ------------------
 const outLong = await search.execute({ keywords: 'deltaunique' })
 assert.match(outLong, /memory\/memory\.md/)
+assert.ok(outLong.includes('authoritative'), 'long-term block among hits ⇒ authoritative branch (2026-08-29)')
+assert.ok(!outLong.includes('file it via the memory tool'), 'authoritative branch excludes the file-new branch')
 assert.equal(rowCount(outLong), 1, 'long-term first place must NOT gain a duplicate append seat')
 
 // --- MIN_SCORE floor: weak partial matches never surface ------------------------
@@ -108,6 +112,7 @@ assert.match(outAppend, /近水楼台/, 'best diary keeps slot 1')
 assert.match(outAppend, /昨日流水/, 'second diary KEEPS slot 2 (additive, not evicting)')
 assert.match(outAppend, /追加测试/, 'best-ranking long-term block appended after the regular results')
 assert.equal(rowCount(outAppend), 3)
+assert.ok(outAppend.includes('authoritative'), 'appended long-term seat flips the hint to the authoritative branch')
 
 // off switch: pure top-N
 const searchOff = boot({ searchLimit: 2, longtermAppend: false })
@@ -124,5 +129,5 @@ assert.match(outSolo, /近水楼台/, 'limit 1 keeps the top diary')
 assert.match(outSolo, /追加测试/, 'limit 1 gains the appended long-term block')
 assert.equal(rowCount(outSolo), 2)
 
-console.log('execute-layer checks passed (params, notices, window, MIN_SCORE, pure retrieval, store filtering, additive long-term seat)')
+console.log('execute-layer checks passed (params, notices, window, MIN_SCORE, composition-driven long-term hint, store filtering, additive long-term seat)')
 rmSync(home, { recursive: true, force: true })

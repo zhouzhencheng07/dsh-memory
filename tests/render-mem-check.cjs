@@ -37,8 +37,8 @@ let registered = null; // { entry, component } 从 slots.inject 捕获
 const scopeStub = {
   getSnapshot: () => ({
     status: "ready",
-    value: { searchLimit: 5, embeddingBaseUrl: "", embeddingModel: "bge-m3", longtermAppend: true },
-    base: { searchLimit: 5, embeddingBaseUrl: "", embeddingModel: "bge-m3", longtermAppend: true },
+    value: { searchLimit: 5, embeddingBaseUrl: "", embeddingModel: "bge-m3", autoMemory: true, longtermAppend: true },
+    base: { searchLimit: 5, embeddingBaseUrl: "", embeddingModel: "bge-m3", autoMemory: true, longtermAppend: true },
     user: {},
     writable: true,
   }),
@@ -108,9 +108,10 @@ check("MemoryCard 渲染无异常", !!out && typeof out === "object");
 const inputs = callLog.filter(([kind, type]) => kind === "jsx" && type === "input");
 check("渲染体产出 input 控件（settings 卡片字段行）", inputs.length > 0);
 const checkboxes = inputs.filter(([, , props]) => props?.type === "checkbox");
-// 2026-08-28: autoMemory 开关已随提醒删除，bool 字段只剩 longtermAppend
-check("bool 字段渲染为 checkbox（longtermAppend）", checkboxes.length >= 1);
+// 2026-08-29: autoMemory 开关随每轮提醒一起恢复，bool 字段共 2 个
+check("bool 字段渲染为 checkbox（autoMemory + longtermAppend ≥2 个）", checkboxes.length >= 2);
 const rowText = callLog.map(([, , props]) => props?.children).flat(10).filter((x) => typeof x === "string").join(" ");
+check("字段文案存在（每轮记忆提醒）", rowText.includes("每轮记忆提醒") || rowText.includes("Per-turn memory reminder"));
 check("字段文案存在（长期块追加返回）", rowText.includes("长期块追加返回") || rowText.includes("Append long-term block"));
 
 // 第二次渲染（模拟文档提交后的重读路径）也不应抛异常

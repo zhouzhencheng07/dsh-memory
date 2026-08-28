@@ -8,8 +8,11 @@
 //   4) topic 参数：定位 memory/<topic>.md（可被检索索引）；非法 topic 拒绝；
 //   5) 无会话调用：读自由、写仅 create、edit 恒拒（镜像原生 owner 语义）；
 //      跨会话 CAS：A 读 → B 写 → A 编辑被拒；
-//   6) 工具面：memory + memory_search 注册、描述中性（无"必须"）、参数面
-//      完整；零 host hook（ctx.on 即失败）。
+//   6) 每轮提醒 = systemPrompt.context 贡献（2026-08-29 恢复）：文案只讲时机
+//      （必须用 memory 工具），autoMemory 开关 / 子代理 / 无 agent 控制空文本；
+//   7) 工具面：memory + memory_search 注册、描述承载机制与组织规则（无"必须"）、
+//      参数面完整；固化指引由检索结果组成驱动（不在描述里）；零 host hook
+//      （ctx.on 即失败）。
 // 插件侧 node:fs 直写自己的数据根（依据见 src/index.js 头注），不子派发
 // 原生工具，因此测试直接对 MEM_TEST_HOME 沙箱真实读写——任何权限模式下
 // 捕获均可用，不存在"workspace-write 拒写"路径。每个用例独占一个 cwd
@@ -35,15 +38,20 @@ async function check(label, fn) {
 
 function boot() {
   const registered = []
+  let contextReg = null
   apply({
     tools: { register: (tool) => registered.push(tool) },
-    inject: () => {},
+    inject: (_deps, cb) => {
+      cb({ systemPrompt: { context: (reg) => { contextReg = reg } } })
+      return { dispose() {} }
+    },
+    effect: (fn) => fn(),
     on: () => { throw new Error('dsh-memory must not register host event hooks') },
   })
   const memory = registered.find((x) => x.name === 'memory')
   const search = registered.find((x) => x.name === 'memory_search')
   assert.ok(memory && search, 'memory + memory_search registered')
-  return { memory, search }
+  return { memory, search, contextReg }
 }
 
 function makeExec(sessionId = 's1', cwd = 'C:\\work') {
@@ -259,6 +267,30 @@ await check('跨会话 CAS：A 读 → B 读后写 → A 编辑被拒', async ()
   )
 })
 
+// --- 每轮提醒：context 贡献（2026-08-29 恢复） ----------------------------------
+await check('autoMemory=true 且主 agent：提醒为短时机文案（时机 + 必须用 memory 工具）', async () => {
+  const { contextReg } = boot()
+  assert.ok(contextReg, 'systemPrompt.context registered')
+  assert.equal(contextReg.name, 'dsh-memory:auto')
+  const text = contextReg.text({ agent: { session: { id: 's1', header: { cwd: 'C:\\work' } } } })
+  assert.equal(text, 'When this turn produced something worth keeping across sessions, you MUST use the `memory` tool.')
+  assert.ok(!text.includes('mode'), '提醒只讲时机，不含使用手法（手法在工具描述）')
+})
+
+await check('autoMemory=false：提醒为空', async () => {
+  globalThis.__MEM_SETTINGS__ = { autoMemory: false }
+  const { contextReg } = boot()
+  assert.equal(contextReg.text({ agent: { session: { id: 's1', header: { cwd: 'C:\\work' } } } }), '')
+  delete globalThis.__MEM_SETTINGS__
+})
+
+await check('子代理（delegationDepth>0）与无 agent：提醒为空', async () => {
+  const { contextReg } = boot()
+  assert.equal(contextReg.text({ agent: { session: { id: 's1', header: { cwd: 'C:\\work', delegationDepth: 1 } } } }), '')
+  assert.equal(contextReg.text({}), '')
+  assert.equal(contextReg.text({ agent: {} }), '')
+})
+
 // --- 工具面 ---------------------------------------------------------------------
 await check('工具面：描述含机制与组织规则（时机规则外置 AGENTS.md）、参数齐全', async () => {
   assert.equal(name, 'dsh-memory')
@@ -266,7 +298,7 @@ await check('工具面：描述含机制与组织规则（时机规则外置 AGE
   assert.ok(/Read before modify/.test(memory.description), '描述含先读后改机制说明')
   assert.ok(/organize under # headings/i.test(memory.description), '组织规则在工具层（2026-08-29 分层：AGENTS.md 只写时机）')
   assert.ok(/never play-by-play/i.test(memory.description), '内容取舍规则在工具层')
-  assert.ok(/treat them as authoritative/.test(searchTool.description), '检索后固化/修正指引在 memory_search 描述里')
+  assert.ok(!/treat them as authoritative/.test(searchTool.description), '固化指引不在描述里——由检索结果组成驱动（2026-08-29）')
   assert.deepEqual(
     Object.keys(memory.parameters).sort(),
     ['content', 'mode', 'new_string', 'old_string', 'replace_all', 'topic'],

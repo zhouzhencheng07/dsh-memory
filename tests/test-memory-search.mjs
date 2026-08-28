@@ -1,6 +1,6 @@
 // Positional keyword scoring verification for memory_search (2026-08-25):
 //   ONE `keywords` string parsed by parseKeywords() — the FIRST 3 terms score
-//   PRIMARY_WEIGHT per hit, the next 4 SECONDARY_WEIGHT — partial credit per
+//   PRIMARY_WEIGHT per hit, the next 2 SECONDARY_WEIGHT — partial credit per
 //   matched keyword, no hard AND gate; blocks scoring below MIN_SCORE never
 //   return. Replaces the 2026-08-24 explicit two-parameter groups.
 // search.js is dependency-free, so no stub loader is needed.
@@ -46,14 +46,14 @@ check('looseNormalize strips markdown decoration, keeps identifiers', () => {
 })
 
 // --- parseKeywords ----------------------------------------------------------
-check('parseKeywords caps positionally at 3+4 and reports drops', () => {
+check('parseKeywords caps positionally at 3+2 and reports drops', () => {
   assert.equal(MAX_PRIMARY_KEYWORDS, 3)
-  assert.equal(MAX_SECONDARY_KEYWORDS, 4)
+  assert.equal(MAX_SECONDARY_KEYWORDS, 2)
   const kw = parseKeywords('a b c d e f g h i')
   assert.deepEqual(kw.primary, ['a', 'b', 'c'])
-  assert.deepEqual(kw.secondary, ['d', 'e', 'f', 'g'])
+  assert.deepEqual(kw.secondary, ['d', 'e'])
   assert.equal(kw.notices.length, 1)
-  assert.match(kw.notices[0], /keywords capped to 7.*dropped: h, i/)
+  assert.match(kw.notices[0], /keywords capped to 5.*dropped: f, g, h, i/)
 })
 
 check('parseKeywords dedupes at the first occurrence', () => {
@@ -136,6 +136,21 @@ check('MIN_SCORE keeps a primary hit even at the recency floor', () => {
   // 365 days old → decay floored at 0.4 → 3 ÷ 2 × 0.4 = 0.6 ≥ 0.5
   const hits = searchMemory([entry('a.md', '# 远\n\n阈值', daysAgo(365))], ['阈值'], [], 5)
   assert.equal(hits.length, 1)
+})
+
+// --- coverage floor (2026-08-29) ----------------------------------------------
+check('coverage: a 1-of-5 match is cut while a multi-term match survives', () => {
+  const entries = ['a', 'b', 'c', 'd', 'e'].map((t, i) => entry(`f${i}.md`, `# 块${i}\n\nuniquetok-${t} 独占这里。`))
+  entries.push(entry('pair.md', '# 对\n\nuniquetok-a uniquetok-b uniquetok-c 同时在场。'))
+  const hits = searchMemory(entries, ['uniquetok-a', 'uniquetok-b', 'uniquetok-c'], ['uniquetok-d', 'uniquetok-e'], 10)
+  assert.equal(hits.length, 1, 'single-term blocks (~25% coverage) die, the triple (~75%) lives')
+  assert.match(hits[0].rel, /pair\.md/)
+})
+
+check('coverage: absent/wrong keywords do not inflate the bar', () => {
+  const entries = [entry('only.md', '# 唯一\n\nuniquetok-present 在这里。')]
+  const hits = searchMemory(entries, ['uniquetok-present', 'ghost-one', 'ghost-two'], [], 10)
+  assert.equal(hits.length, 1, '2 of 3 keywords are ghosts — the real match must survive')
 })
 
 // --- real-corpus acceptance: the exact query that missed on 2026-08-22 -------

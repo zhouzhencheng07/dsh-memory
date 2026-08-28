@@ -71,8 +71,8 @@ Usage: node mem.mjs <command> [options]
 
 Commands:
   search  --keywords "a b c" [--limit N] [--days N]
-          Block-level keyword search; up to 7 space-separated terms, most
-          essential FIRST (first 3 weigh x3, next 4 x1). --days 0 disables
+          Block-level keyword search; up to 5 space-separated terms, most
+          essential FIRST (first 3 weigh x3, next 2 x1). --days 0 disables
           the diary window.
   read    [--topic NAME]
           Print today's note for this workspace (or topics/<NAME>.md) with

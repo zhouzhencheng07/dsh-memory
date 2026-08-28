@@ -231,7 +231,7 @@ await check('empty results: no hint attached, absent keyword reported', withHome
 await check('keyword overflow is reported in a notice line', withHome(async (home) => {
   seedDiary(home, 0, SLUG_A, DIARY_TEXT)
   const out = await run(['search', '--keywords', 'a b c d e f g h i'])
-  assert.match(out, /^keywords capped to 7/)
+  assert.match(out, /^keywords capped to 5/)
 }))
 
 console.log(`\n${passed} checks passed${process.exitCode ? ' (with failures above)' : ''}`)

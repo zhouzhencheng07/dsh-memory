@@ -60,8 +60,11 @@
 
 /** Cap on the LEADING essential keywords (positional group 1, high weight). */
 export const MAX_PRIMARY_KEYWORDS = 3
-/** Cap on the trailing context keywords (positional group 2, low weight). */
-export const MAX_SECONDARY_KEYWORDS = 4
+/** Cap on the trailing context keywords (positional group 2, low weight).
+ * Tightened 4 → 2 on 2026-08-29 (user call): a 5-term budget keeps the query
+ * sharp — models stuff keywords when given room, diluting the essential
+ * terms; with IDF and the coverage floor, extra context terms add little. */
+export const MAX_SECONDARY_KEYWORDS = 2
 /** Per-keyword score bonus for a primary-group hit (high). */
 export const PRIMARY_WEIGHT = 3
 /** Per-keyword score bonus for a secondary-group hit (low). */
@@ -74,6 +77,17 @@ export const SECONDARY_WEIGHT = 1
  * hit ~0.5 fresh and ~0.2 aged. A keyword present in EVERY block weighs
  * ~0, so a block matching only generic terms falls under the floor. */
 export const MIN_SCORE = 0.5
+/**
+ * Coverage floor (2026-08-29): a block must account for at least this
+ * fraction of the query's REALIZED evidence — Σ(weight × idf) over the given
+ * keywords — or it is dropped. This is how the score line scales with the
+ * keyword count WITHOUT assuming the keywords are right: matching 1 of 7
+ * rare terms is ~1/5 evidence (cut), while wrong/absent keywords (idf 0) and
+ * generic ones (idf ≈ 0) contribute nothing to the denominator and never
+ * inflate the bar. The absolute MIN_SCORE stays as the backstop for
+ * all-generic queries where coverage is meaningless.
+ */
+export const MIN_COVERAGE = 0.3
 
 /** Max chars of a returned snippet window (oversized-block fallback). */
 export const SNIPPET_CHARS = 200
@@ -336,9 +350,16 @@ export function searchMemory(entries, primaryKeywords = [], secondaryKeywords = 
     }
   }
   const idf = new Map(keywords.map((k) => [k, idfWeight(df.get(k), blocks.length)]))
+  const groups = [[PRIMARY_WEIGHT, primary], [SECONDARY_WEIGHT, secondary]]
+  // realized max evidence for the coverage floor: keywords absent from the
+  // corpus (df=0 → idf 0) and generic ones (idf ≈ 0) add nothing, so wrong
+  // keywords never inflate the bar — only discriminating terms count
+  let maxEvidence = 0
+  for (const [weight, group] of groups) {
+    for (const keyword of group) maxEvidence += weight * idf.get(keyword)
+  }
   const totalLen = blocks.reduce((sum, b) => sum + b.block.text.length, 0)
   const avgLen = Math.max(1, totalLen / Math.max(1, blocks.length))
-  const groups = [[PRIMARY_WEIGHT, primary], [SECONDARY_WEIGHT, secondary]]
   const hits = []
   for (const { entry, block, loose } of blocks) {
     let weighted = 0
@@ -352,6 +373,9 @@ export function searchMemory(entries, primaryKeywords = [], secondaryKeywords = 
       }
     }
     if (weighted === 0) continue
+    // coverage floor: the block must account for a real fraction of the
+    // query's realized evidence (maxEvidence > 0 whenever weighted > 0)
+    if (weighted / maxEvidence < MIN_COVERAGE) continue
     const lenNorm = weighted / (1 + block.text.length / avgLen)
     const score = lenNorm * recencyWeight(entry.date)
     if (score < MIN_SCORE) continue // too-low partial matches are noise

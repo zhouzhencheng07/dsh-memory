@@ -62,7 +62,7 @@ assert.ok(out1.includes('file it via the memory tool into topics/<topic>.md'), '
 assert.ok(!out1.includes('authoritative'), 'file-new branch excludes the authoritative branch')
 
 const outCap = await search.execute({ keywords: 'alphaunique extra1 extra2 extra3 extra4 extra5 extra6 extra7 extra8' })
-assert.match(outCap, /^keywords capped to 7 \(dropped: extra7, extra8\)/)
+assert.match(outCap, /^keywords capped to 5 \(dropped: extra5, extra6, extra7, extra8\)/)
 
 await assert.rejects(() => search.execute({ keywords: '   ' }), /no usable keywords/)
 

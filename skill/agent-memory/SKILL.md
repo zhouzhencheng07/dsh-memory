@@ -23,7 +23,7 @@ mem.mjs write  [--topic NAME] [--expect-hash H]    # full note text on stdin
 mem.mjs edit   --expect-hash H [--topic NAME]      # {"old":"...","new":"...","replace_all":false} on stdin
 ```
 
-- `search` keywords: up to 7 space-separated terms, **most essential FIRST** — the first 3 weigh ×3, the next 4 ×1. Pick words the notes actually contain, not synonyms. Hits are whole markdown blocks with absolute file paths; open a hit's file when the block alone is not enough.
+- `search` keywords: up to 5 space-separated terms, **most essential FIRST** — the first 3 weigh ×3, the next 2 ×1. Pick words the notes actually contain, not synonyms; distinctive (rare) terms beat generic ones. Hits are whole markdown blocks with absolute file paths; open a hit's file when the block alone is not enough.
 - `read` prints the file plus a `[hash: ...]` footer. ABSENT output lists existing long-term topics.
 - **Write guard (stateless CAS):** `write` on an existing file and every `edit` require `--expect-hash` from the latest read; every mutation prints the NEW hash, so consecutive edits can chain with it. The hash changes when anyone else touches the file — on refusal, read again.
 

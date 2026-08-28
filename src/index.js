@@ -20,7 +20,7 @@
 //     result composition (see the retrieval bullet).
 //   - retrieval: memory_search over the corpus (block-level; POSITIONAL
 //     keyword scoring 2026-08-25 — ONE `keywords` parameter of up to 7
-//     terms, first 3 ×3 then next 4 ×1, partial credit per matched keyword,
+//     terms, first 3 ×3 then next 2 ×1, partial credit per matched keyword,
 //     no hard AND gate, MIN_SCORE floor — plus optional vector,
 //     recency-weighted). Long-term guidance is COMPOSITION-DRIVEN since
 //     2026-08-29: the output ends with a hint branched on the result
@@ -148,11 +148,11 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
     name: 'memory_search',
     description:
       'Search the cross-session memory library by literal keyword matching with partial credit per matched keyword. ' +
-      '`keywords` holds up to 7 space-separated terms, most essential FIRST — earlier terms weigh more; distinctive (rare) terms weigh more than generic ones, so pick words the notes actually contain, not synonyms. ' +
+      '`keywords` holds up to 5 space-separated terms, most essential FIRST — earlier terms weigh more; distinctive (rare) terms weigh more than generic ones, so pick words the notes actually contain, not synonyms. ' +
       'Returns block-level hits whose snippet is the whole block; low-scoring hits are dropped. ' +
       'When a hit is not enough on its own, open its source file and continue from the matching block.',
     parameters: {
-      keywords: { type: 'string', required: true, description: 'Up to 7 space-separated terms, most essential first — earlier terms weigh more' },
+      keywords: { type: 'string', required: true, description: 'Up to 5 space-separated terms, most essential first — earlier terms weigh more' },
     },
     output: {
       schema: { type: 'string' },

@@ -31,11 +31,11 @@ mem.mjs edit   --expect-hash H [--topic NAME]      # {"old":"...","new":"...","r
 
 1. **Recall** — when a task touches earlier sessions' decisions, pitfalls, environment quirks or preferences: `search` first; say so plainly when nothing is found.
 2. **Record** — after a turn produced something worth keeping across sessions (decision and its reason, pitfall and fix, reusable command/process, state change): read today's note, then append with `edit` (or create with `write`). Reusable experience only, never play-by-play.
-3. **Consolidate** — when a search hit proves a fact worth keeping long term, file it into `topics/<topic>.md`: update the matching topic file in place, or start a new one when none matches. When a long-term block is among the hits, it is authoritative: correct outdated statements in place and merge topic files that clearly overlap.
+3. **Consolidate** — when a search hit proves a fact worth keeping long term, file it into `topics/<topic>.md`: update the matching topic file in place, or start a new one when none matches. When a long-term block is among the hits, it is authoritative: correct outdated statements in its topic file in place and merge topic files that clearly overlap.
 
 ## Rules
 
-- Organize under `#` headings; one block per subject; keep blocks concise; correct outdated statements in place instead of appending corrections.
+- Organize under `#` headings; one block per subject; keep blocks concise; correct outdated statements in place instead of appending corrections — today's note and topic files only; aged diary blocks need no fixing (the window and per-day decay retire them).
 - Merge near-duplicate topic files instead of spawning parallel ones.
 - Must-follow rules belong in the user's instructions file (AGENTS.md), never in memory.
 - Example: `node mem.mjs search --keywords "pnpm profile dsh"`; `node mem.mjs write --topic windows-env < note.md` (pipe the text on stdin).

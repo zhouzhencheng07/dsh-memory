@@ -381,7 +381,7 @@ function memoryFileTool() {
       "The optional topic parameter targets the long-term library file topics/<topic>.md instead of today's note. " +
       'Read before modify, exactly like the native file tools. ' +
       'What to record: reusable experience only, never play-by-play — decisions and their reasons, pitfalls and fixes, reusable commands and processes, state changes; ' +
-      'organize under # headings, merge related topics, keep each block concise, and correct outdated statements in place. ' +
+      'organize under # headings, merge related topics, keep each block concise, and correct outdated statements in place — today\'s note and topic files only; aged diary blocks need no fixing (the window and per-day decay retire them on their own). ' +
       'Topic files hold cross-project evergreen experience (environment/tooling lessons, collaboration preferences, general patterns): one topic per file, update the matching file in place and merge near-duplicates instead of spawning parallel ones.',
     parameters: {
       mode: { type: 'string', description: '"read" (default), "write" or "edit"' },

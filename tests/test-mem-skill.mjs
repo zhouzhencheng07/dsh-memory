@@ -5,7 +5,8 @@
 //      variable is the ONLY home resolution (no flag, no default), and the
 //      commands behave like the plugin's tools — read/write/edit + hash-CAS
 //      refusals, topic validation and targeting, search with absolute paths,
-//      the long-term append seat, the 45-day diary window, and the
+//      the long-term append seat, the locked search parameters (limit 2 /
+//      45-day window, no --limit/--days overrides), and the
 //      composition-driven hint branches.
 // No @deepseek-ai imports live under skill/, so no stub loader is needed.
 // Usage: node tests/test-mem-skill.mjs
@@ -216,9 +217,13 @@ await check('45-day diary window: aged-out diaries leave the corpus, topic files
   const out = await run(['search', '--keywords', 'pnpm profile'])
   assert.match(out, /windows-env/)
   assert.ok(!/pnpm profile \(score/.test(out), 'aged diary block is gone; only the long-term seat remains')
-  const withWindow = await run(['search', '--keywords', 'pnpm profile', '--days', '0'])
-  assert.match(withWindow, /pnpm profile \(score/)
   assert.ok(home.length > 0)
+}))
+
+await check('search parameters are locked like the plugin: --limit/--days get an instructive refusal', withHome(async () => {
+  await assert.rejects(() => run(['search', '--keywords', 'x', '--limit', '5']), /no --limit\/--days/)
+  await assert.rejects(() => run(['search', '--keywords', 'x', '--days', '0']), /no --limit\/--days/)
+  await assert.rejects(() => run(['search', '--keywords', 'x', '--limit=3']), /no --limit\/--days/)
 }))
 
 await check('empty results: no hint attached, absent keyword reported', withHome(async () => {

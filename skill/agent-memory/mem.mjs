@@ -26,9 +26,10 @@
 // locked to a single safe path segment, diary slugs derived from the cwd.
 //
 // Differences from the plugin's memory_search: keyword-only (no optional
-// vector fusion — keeps this file dependency-free), fixed defaults
-// (limit 2, 45-day diary window, long-term append seat always on) with
-// --limit/--days overrides.
+// vector fusion — keeps this file dependency-free). Search parameters are
+// LOCKED like the plugin's config (user decision 2026-08-29): limit 2 and
+// the 45-day diary window are constants — no --limit/--days overrides, the
+// agent-facing interface is keywords only, exactly like the plugin's tool.
 //
 // Plain ESM JavaScript on purpose: zero dependencies, runs on any agent that
 // has Node and a shell. See SKILL.md for the model-facing usage contract.
@@ -47,12 +48,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { join, relative, resolve } from 'node:path'
 import { formatHits, parseKeywords, searchMemory } from './search.js'
 
-/** Default result count (plugin default searchLimit: 2). */
-const DEFAULT_LIMIT = 2
-/** Max result count, mirroring the plugin's MAX_LIMIT. */
-const MAX_LIMIT = 10
-/** Default hard window for dated notes in days (plugin default: 45). 0 disables. */
-const DEFAULT_WINDOW_DAYS = 45
+/** Result count, LOCKED to the plugin's searchLimit default of 2 (user
+ * decision 2026-08-29: never agent-specifiable, same as the plugin tool). */
+const SEARCH_LIMIT = 2
+/** Hard window for dated notes in days, LOCKED to the plugin's
+ * dailyWindowDays default — aged-out diaries leave the corpus on purpose. */
+const WINDOW_DAYS = 45
 /** Long-term layer classification: a rel whose FIRST path segment does not
  * parse as a date is a long-term topic file (topics/<topic>.md — and any
  * pre-rename memory/ files), mirroring the plugin and walkMemory's window
@@ -65,15 +66,15 @@ const MAX_READ_BYTES = 2 * 1024 * 1024
 /** Long-term topic names: letters/digits/`-`/`_`, one safe path segment. */
 const TOPIC_RE = /^[\p{L}\p{N}_-]+$/u
 
-const USAGE = `agent-memory — cross-session memory CLI (shared with the dsh-memory plugin)
+const USAGE = `agent-memory — cross-session, cross-agent memory CLI
 
 Usage: node mem.mjs <command> [options]
 
 Commands:
-  search  --keywords "a b c" [--limit N] [--days N]
+  search  --keywords "a b c"
           Block-level keyword search; up to 5 space-separated terms, most
-          essential FIRST (first 3 weigh x3, next 2 x1). --days 0 disables
-          the diary window.
+          essential FIRST (first 3 weigh x3, next 2 x1). Result count (2) and
+          the 45-day diary window are fixed — no --limit/--days overrides.
   read    [--topic NAME]
           Print today's note for this workspace (or topics/<NAME>.md) with
           its [hash: ...] footer. ABSENT output lists existing topics.
@@ -150,8 +151,10 @@ export function walkMemory(root, windowDays = 0) {
 
 /** Flags that TAKE a value. Their next token is consumed unconditionally —
  * even when it starts with `--`, because realistic values (a `--slug` like
- * `--D-Project-x--`) start with dashes too. Unknown flags are boolean. */
-const VALUE_FLAGS = new Set(['keywords', 'limit', 'days', 'topic', 'slug', 'home', 'expect-hash'])
+ * `--D-Project-x--`) start with dashes too. Only SUPPORTED value flags are
+ * listed: anything else (e.g. the removed --limit/--days/--home) parses as
+ * boolean and can never swallow a following flag. Unknown flags are boolean. */
+const VALUE_FLAGS = new Set(['keywords', 'topic', 'slug', 'expect-hash'])
 
 function parseFlags(args) {
   const flags = {}
@@ -178,8 +181,8 @@ function resolveHome() {
   const home = String(process.env.AGENT_MEMORY_HOME ?? '').trim()
   if (!home) {
     throw new Error(
-      'agent-memory: memory home is not configured — set the AGENT_MEMORY_HOME environment variable ' +
-        '(e.g. the dsh plugin data root); this CLI deliberately has no default home',
+      'agent-memory: memory home is not configured — set the AGENT_MEMORY_HOME environment variable to the library root; ' +
+        'this CLI deliberately has no default home',
     )
   }
   return resolve(home)
@@ -231,14 +234,21 @@ function resolveTarget(root, flags) {
 
 function cmdSearch(root, flags) {
   if (flags.keywords === true || flags.keywords === undefined) {
-    throw new Error('agent-memory: pass --keywords "term1 term2 ..." (up to 7 terms, most essential first)')
+    throw new Error('agent-memory: pass --keywords "term1 term2 ..." (up to 5 terms, most essential first)')
   }
+  // Locked parameters, mirroring the plugin's locked searchLimit/window
+  // config (user decision 2026-08-29): the interface is keywords only — a
+  // stale --limit/--days habit gets an instructive refusal, not a silent
+  // ignore.
+  if (flags.limit !== undefined || flags.days !== undefined) {
+    throw new Error('agent-memory: search takes no --limit/--days — result count (2) and the diary window (45 days) are fixed')
+  }
+  const limit = SEARCH_LIMIT
+  const windowDays = WINDOW_DAYS
   const kw = parseKeywords(String(flags.keywords ?? ''))
   if (kw.primary.length === 0 && kw.secondary.length === 0) {
     throw new Error('agent-memory: no usable keywords')
   }
-  const limit = Math.min(Math.max(Math.floor(Number(flags.limit ?? DEFAULT_LIMIT)) || DEFAULT_LIMIT, 1), MAX_LIMIT)
-  const windowDays = Math.max(0, Math.floor(Number(flags.days ?? DEFAULT_WINDOW_DAYS) || 0))
   // keyword health (absent / too-generic terms) is reported back so the
   // caller can reword its query
   const stats = []

@@ -73,8 +73,7 @@ Usage: node mem.mjs <command> [options]
 Commands:
   search  --keywords "a b c"
           Block-level keyword search; up to 5 space-separated terms, most
-          essential FIRST (first 3 weigh x3, next 2 x1). Result count (2) and
-          the 45-day diary window are fixed — no --limit/--days overrides.
+          essential FIRST (first 3 weigh x3, next 2 x1).
   read    [--topic NAME]
           Print today's note for this workspace (or topics/<NAME>.md) with
           its [hash: ...] footer. ABSENT output lists existing topics.

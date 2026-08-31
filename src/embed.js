@@ -1,7 +1,7 @@
 // dsh-memory — optional vector retrieval (v4: persisted signature cache).
 //
 // Zero-dependency by default: nothing here runs until `embeddingBaseUrl` is
-// configured (settings.yaml, hot-reloaded). When configured, memory_search
+// configured (settings.yaml, hot-reloaded). When configured, memory recall
 // embeds memory files and the query through an Ollama-compatible
 // /api/embed endpoint and fuses vector hits with substring hits (RRF).
 //
@@ -33,7 +33,7 @@
 //     the block-splitting algorithm changes.
 //   - resilience: every network error propagates to the caller, which falls
 //     back to pure substring results; a broken embedding service never
-//     breaks memory_search. Cache READ and WRITE failures degrade to the
+//     breaks recall. Cache READ and WRITE failures degrade to the
 //     in-memory behavior (warn, never throw).
 
 import { createHash } from 'node:crypto'

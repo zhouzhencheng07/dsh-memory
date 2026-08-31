@@ -140,7 +140,7 @@ export function recencyWeight(date) {
 }
 
 /**
- * Parse the single `keywords` argument for memory_search (2026-08-25):
+ * Parse the single `keywords` argument for recall (2026-08-25):
  * whitespace-split, looseNormalize'd, deduped (a term counts once, at its
  * FIRST occurrence), then split POSITIONALLY — the first
  * MAX_PRIMARY_KEYWORDS become the high-weight essential terms, the next
@@ -283,13 +283,15 @@ export function snippet(value, query) {
  * block text when it fits (blocks are `##`-level units, typically 150-1000
  * chars), so the agent can usually continue from the result alone; only
  * oversized blocks fall back to a hit-centered window plus a length hint,
- * which is when opening the source file may be warranted.
+ * which is when re-reading the block by its address is warranted (2026-09-01:
+ * hits carry no file path, so "open the source file" is no longer something
+ * the agent can do).
  */
 export function blockSnippet(text, query) {
   const t = String(text ?? '').trim()
   if (t.length <= SNIPPET_FULL) return t
   const win = snippet(t, query)
-  return `${win}\n(block is ${t.length} chars; only the hit-centered excerpt is shown — open the source file for more)`
+  return `${win}\n(block is ${t.length} chars; only the hit-centered excerpt is shown — read the whole block with memory {mode:"recall", …})`
 }
 
 /**
@@ -402,37 +404,72 @@ function formatScore(score) {
   return Number.isInteger(n) ? String(n) : String(Number(n.toFixed(4)))
 }
 
-/**
- * Absolute display path for a hit: `rootDir` joined with the rel's FILE part,
- * keeping the `#breadcrumb` suffix verbatim. Forward slashes throughout so
- * the path is stable in output regardless of platform separators.
+/** Split a hit rel (`2026-08-20/--D-Project-x--.md#工具链 > pnpm`) into its
+ * file part and its heading breadcrumb.
+ * @param {string} rel
+ * @returns {{file: string, block: string}}
  */
-function displayPath(rel, rootDir) {
-  const base = String(rootDir ?? '').trim().replaceAll('\\', '/').replace(/\/+$/, '')
-  if (!base) return String(rel ?? '')
+export function splitHitRel(rel) {
   const text = String(rel ?? '')
   const hash = text.indexOf('#')
-  const file = hash < 0 ? text : text.slice(0, hash)
-  const title = hash < 0 ? '' : text.slice(hash)
-  return `${base}/${file}${title}`
+  return hash < 0 ? { file: text, block: '' } : { file: text.slice(0, hash), block: text.slice(hash + 1) }
+}
+
+/**
+ * The address a row shows for a hit — and the value the model copies back
+ * into `recall` to read further (2026-09-01: hits no longer carry file
+ * PATHS, so this label is the ONLY way to address a note, and it is
+ * deliberately not a path):
+ *   - a diary note → `2026-08-20 · D-Project-x` (the two fields `recall`
+ *     takes back as `date` and `workspace`);
+ *   - a long-term note → `topics/windows-env` (the `topic` value; the
+ *     classification matches walkMemory's — a first segment that does not
+ *     parse as a date is long-term, so pre-rename `memory/` files stay
+ *     readable and writable under their own address).
+ * @param {string} rel
+ * @returns {string}
+ */
+export function hitAddress(rel) {
+  const { file } = splitHitRel(rel)
+  const parts = String(file).split('/')
+  const head = parts[0] ?? ''
+  const longterm = !Number.isFinite(Date.parse(head))
+  if (longterm) return String(file).replace(/\.md$/i, '')
+  // dated layer: <date>/<slug>.md → "date · workspace"
+  const name = parts.slice(1).join('/').replace(/^-+/, '').replace(/-*\.md$/i, '')
+  return name ? `${head} · ${name}` : head
+}
+
+/** The block whose heading breadcrumb equals `title` (whitespace- and
+ * case-tolerant), or null. `recall`'s `block` parameter resolves through
+ * this, so the breadcrumb printed in a hit row is a stable, stateless
+ * address that survives across calls.
+ * @param {string} text - whole file text
+ * @param {string} title - heading breadcrumb, e.g. `工具链 > pnpm`
+ * @returns {{title: string, text: string}|null}
+ */
+export function findBlock(text, title) {
+  const wanted = String(title ?? '').trim().toLocaleLowerCase()
+  if (!wanted) return null
+  return splitBlocks(text).find((b) => b.title.trim().toLocaleLowerCase() === wanted) ?? null
 }
 
 /**
  * Render search hits for the model. Snippets are whole blocks: line
  * structure is preserved (continuation lines indented) so the agent can
- * scan the block directly instead of opening the source file. When
- * `rootDir` is given, every row shows the hit's ABSOLUTE file path
- * (`$DSH_HOME/dsh-memory/...`) instead of the root-relative rel — the
- * calling agent cannot be assumed to know where the memory root lives, so
- * the path must be directly usable with its native read/edit tools
- * (2026-08-25).
+ * scan the block directly. Rows carry the hit's ADDRESS, never its path
+ * (2026-09-01, user decision): the model is not told where the library
+ * lives on disk, so it cannot bypass the memory tool with its native file
+ * tools — and stale diary notes, which decay and expire by design, stay out
+ * of the writable surface too.
  */
-export function formatHits(hits, rootDir = '') {
+export function formatHits(hits) {
   if (hits.length === 0) return 'No memory found.'
   const lines = []
   for (const hit of hits) {
-    const tag = hit.date || 'index'
-    lines.push(`- [${tag}] ${displayPath(hit.rel, rootDir)} (score ${formatScore(hit.score)})`)
+    const { block } = splitHitRel(hit.rel)
+    const head = block ? `${hitAddress(hit.rel)}] ${block}` : `${hitAddress(hit.rel)}]`
+    lines.push(`- [${head} (score ${formatScore(hit.score)})`)
     const s = String(hit.snippet ?? '')
     lines.push(s.split('\n').map((l, i) => (i === 0 ? `  ${l}` : `    ${l}`)).join('\n'))
   }

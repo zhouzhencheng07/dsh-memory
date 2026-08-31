@@ -37,8 +37,8 @@ let registered = null; // { entry, component } 从 slots.inject 捕获
 const scopeStub = {
   getSnapshot: () => ({
     status: "ready",
-    value: { searchLimit: 2, embeddingBaseUrl: "", embeddingModel: "bge-m3", autoMemory: true, longtermAppend: true },
-    base: { searchLimit: 2, embeddingBaseUrl: "", embeddingModel: "bge-m3", autoMemory: true, longtermAppend: true },
+    value: { memoryRoot: "", searchLimit: 2, embeddingBaseUrl: "", embeddingModel: "bge-m3", autoMemory: true, longtermAppend: true },
+    base: { memoryRoot: "", searchLimit: 2, embeddingBaseUrl: "", embeddingModel: "bge-m3", autoMemory: true, longtermAppend: true },
     user: {},
     writable: true,
   }),
@@ -111,8 +111,12 @@ const checkboxes = inputs.filter(([, , props]) => props?.type === "checkbox");
 // 2026-08-29: autoMemory 开关随每轮提醒一起恢复，bool 字段共 2 个
 check("bool 字段渲染为 checkbox（autoMemory + longtermAppend ≥2 个）", checkboxes.length >= 2);
 const rowText = callLog.map(([, , props]) => props?.children).flat(10).filter((x) => typeof x === "string").join(" ");
+check("字段文案存在（记忆库根目录）", rowText.includes("记忆库根目录") || rowText.includes("Memory library root"));
 check("字段文案存在（每轮记忆提醒）", rowText.includes("每轮记忆提醒") || rowText.includes("Per-turn memory reminder"));
 check("字段文案存在（长期块追加返回）", rowText.includes("长期块追加返回") || rowText.includes("Append long-term block"));
+// 2026-09-01: memoryRoot 是第一个字段（text 类型）
+const texts = inputs.filter(([, , props]) => props?.type === "text");
+check("text 字段含 memoryRoot（共 4 个 text：memoryRoot/baseUrl/model + 数值类）", texts.length >= 4);
 
 // 第二次渲染（模拟文档提交后的重读路径）也不应抛异常
 out = renderCard();

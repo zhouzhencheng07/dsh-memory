@@ -37,9 +37,11 @@ window.__ModuleLoader__.load({
     // ── locale copy ──────────────────────────────────────────────────────────
     const en = {
       title: "Memory (dsh-memory)",
-      description: "Cross-session memory: daily per-workspace notes and memory_search.",
+      description: "Cross-session memory: daily per-workspace notes, long-term topics, and recall search.",
+      memoryRoot: "Memory library root",
+      memoryRootHint: "Where the notes live. Blank = $DSH_HOME/dsh-memory. Changing it switches libraries — existing notes stay where they are.",
       searchLimit: "Search result limit",
-      searchLimitHint: "Result count for memory_search (1-10); the agent cannot override it.",
+      searchLimitHint: "Result count for memory recall (1-10); the agent cannot override it.",
       dailyWindowDays: "Diary search window (days)",
       dailyWindowDaysHint: "Daily notes older than this stop participating in search (0 = unlimited); files stay on disk. Long-term topic files (topics/) are never windowed.",
       embeddingBaseUrl: "Embedding base URL",
@@ -65,9 +67,11 @@ window.__ModuleLoader__.load({
     };
     const zh = {
       title: "记忆（dsh-memory）",
-      description: "跨会话记忆：每日工作区笔记与 memory_search 检索。",
+      description: "跨会话记忆：每日工作区笔记、长期主题文件与 recall 检索。",
+      memoryRoot: "记忆库根目录",
+      memoryRootHint: "笔记存放位置。留空 = $DSH_HOME/dsh-memory。改动后会切换到另一个库——原有笔记仍留在原处。",
       searchLimit: "搜索返回条数",
-      searchLimitHint: "memory_search 返回条数（1-10），agent 不可覆盖。",
+      searchLimitHint: "recall 检索返回条数（1-10），agent 不可覆盖。",
       dailyWindowDays: "日记检索窗口（天）",
       dailyWindowDaysHint: "超过该天数的每日笔记不再参与检索（0=不限），文件保留在磁盘；长期主题文件（topics/）不受窗口限制。",
       embeddingBaseUrl: "向量嵌入服务地址",
@@ -102,6 +106,16 @@ window.__ModuleLoader__.load({
      * when the draft is invalid and must block the save.
      */
     const SPECS = {
+      memoryRoot: {
+        kind: "text",
+        label: "memoryRoot",
+        hint: "memoryRootHint",
+        format: (value) => (typeof value === "string" ? value : ""),
+        parse: (text) => {
+          const trimmed = text.trim();
+          return trimmed === "" ? { kind: "clear" } : { kind: "set", value: trimmed };
+        }
+      },
       searchLimit: {
         kind: "number",
         label: "searchLimit",
@@ -167,7 +181,7 @@ window.__ModuleLoader__.load({
       // ── longtermAppend added 2026-08-25: the long-term append seat is now a
       // user-facing toggle (host default true = additive seat on). ──
     };
-    const FIELDS = ["searchLimit", "dailyWindowDays", "embeddingBaseUrl", "embeddingModel", "autoMemory", "longtermAppend"];
+    const FIELDS = ["memoryRoot", "searchLimit", "dailyWindowDays", "embeddingBaseUrl", "embeddingModel", "autoMemory", "longtermAppend"];
 
     // ── theme-aligned styles (dsw alias tokens, as the official cards use) ──
     // (dropped during the migration rewrite once — the card then crashed every

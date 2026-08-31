@@ -1,12 +1,11 @@
 // dsh-memory plugin for DeepSeek Harness (dsh)
 //
 // Cross-session memory: daily per-workspace notes under <memory root>/
-// YYYY-MM-DD/, long-term topic files under <memory root>/topics/, and memory
-// search. The root follows AGENT_MEMORY_HOME when set (the SAME variable the
-// agent-memory skill uses — one library shared with other agents), falling
-// back to the plugin data root $DSH_HOME/dsh-memory (see store.js).
+// YYYY-MM-DD/, long-term topic files under <memory root>/topics/, and
+// memory search. The root is the `memoryRoot` setting of the `dsh-memory:`
+// section (default: the plugin data root $DSH_HOME/dsh-memory).
 //
-// Design (agreed with the user, 2026-08-16..28):
+// Design (agreed with the user, 2026-08-16..2026-09-01):
 //   - memory = reusable experience reference (decisions, pitfalls, ideas),
 //     NOT a project archive. FINAL capture mechanism (2026-08-29, user
 //     decision — the 2026-08-28 AGENTS.md externalization experiment is
@@ -16,43 +15,47 @@
 //     memory tool", gated on `autoMemory`, subagents excluded) — while usage
 //     mechanics AND organization rules (what to record, # headings, merge,
 //     in-place correction) live in the memory tool description. Long-term
-//     filing is NEVER pre-judged at capture: it follows the memory_search
-//     result composition (see the retrieval bullet).
-//   - retrieval: memory_search over the corpus (block-level; POSITIONAL
-//     keyword scoring 2026-08-25 — ONE `keywords` parameter of up to 7
+//     filing is NEVER pre-judged at capture: it follows the search result
+//     composition (see the retrieval bullet).
+//   - ONE tool, TWO modes (2026-09-01, user decision — `memory_search` is
+//     GONE, folded in as `mode:"recall"`): `recall` = search + read (a
+//     single "get memory out" verb), `remember` = create + replace + edit
+//     (a single "put memory in" verb, whose shape the FILE STATE decides —
+//     absent → `content` creates; present → `old_string` edits in place).
+//     The naming follows the semantics: read/write were narrower than what
+//     the modes actually do (read never covered search, write never covered
+//     edit), and `remember` deliberately does not distinguish creating from
+//     revising — "remember this" is one act.
+//   - retrieval (`mode:"recall"` with `keywords`): block-level; POSITIONAL
+//     keyword scoring 2026-08-25 — ONE `keywords` parameter of up to 5
 //     terms, first 3 ×3 then next 2 ×1, partial credit per matched keyword,
-//     no hard AND gate, MIN_SCORE floor — plus optional vector,
-//     recency-weighted). Long-term guidance is COMPOSITION-DRIVEN since
-//     2026-08-29: the output ends with a hint branched on the result
-//     composition — a memory/ block among the hits ⇒ treat as
+//     no hard AND gate, MIN_SCORE floor, IDF term weighting — plus optional
+//     vector, recency-weighted. Long-term guidance is COMPOSITION-DRIVEN
+//     since 2026-08-29: the output ends with a hint branched on the result
+//     composition — a topics/ block among the hits ⇒ treat as
 //     authoritative / fix in place / merge overlapping topic files; none ⇒
-//     file proved-lasting facts into memory/<topic>.md via the memory tool.
-//     Promotion happens at reuse time and is never pre-judged at capture
-//     (user decision: 被搜到才说明值得长存). Long-term append seat
-//     (2026-08-25): when no long-term block made the cut, the best-ranking
-//     one from the candidate pool is APPENDED after the regular results
-//     (config `longtermAppend`, additive — never evicts); it also flips the
-//     hint branch.
+//     file proved-lasting facts into topics/<topic>.md. Promotion happens at
+//     reuse time and is never pre-judged at capture (user decision:
+//     被搜到才说明值得长存).
+//   - NO FILE PATHS in any output (2026-09-01, user decision): recall rows
+//     and read/write receipts identify notes by ADDRESS (`2026-08-20 ·
+//     D-Project-x`, `topics/windows-env`) instead of by path. The model is
+//     never told where the library lives, so it cannot bypass this tool with
+//     its native read/write/edit — the whole writable surface stays inside
+//     the observation guard, and stale diary notes (which decay and expire
+//     by design) can no longer be dredged up and "fixed" by hand. A hit row
+//     is therefore also the READ KEY: `date` + `workspace` + `block`
+//     addresses the exact block again.
 //   - long-term layer = FREE TOPIC FILES (2026-08-28, user decision):
 //     topics/<topic>.md, one file per topic (renamed from memory/ on
-//     2026-08-29 — with the root itself being the memory library, "memory
-//     inside memory" was redundant; walkMemory indexes ANY non-date
-//     subdirectory, so pre-rename memory/ files stay searchable and the
-//     long-term classification is "first rel segment is not a date", not a
-//     directory-name check). The earlier single memory/memory.md design
-//     (2026-08-24) never shipped — the file was never created, so there is
-//     nothing to migrate. Durable project-specific facts have no layer by
-//     design: they graduate into the user's AGENTS.md or die in the 45-day
-//     diary window (accepted trade-off, forces curation).
-//   - the `memory` tool (2026-08-28, user decision — replaces the 2026-08-23
-//     path locator): a THREE-MODE file tool mirroring the native read/write/
-//     edit contract. No arguments reads TODAY's note (ABSENT output lists
-//     existing topics); mode:"write" creates or fully replaces; mode:"edit"
-//     replaces a unique literal old_string; an optional `topic` parameter
-//     targets topics/<topic>.md. The observation guard mirrors
-//     @deepseek-ai/dsh-fs-observation-policy semantics (per-session
-//     present/absent + version records; write refused on exists-unread and
-//     stale-version; edit refused when unread; unique-match enforcement).
+//     2026-08-29). walkMemory indexes ANY non-date subdirectory, so
+//     pre-rename memory/ files stay searchable and the long-term
+//     classification is "first rel segment is not a date", not a
+//     directory-name check). Topic files have NO directory listing anywhere
+//     in the tool output (2026-09-01, user decision): a list of every topic
+//     is noise that grows without bound and invites browsing by file name
+//     instead of retrieval — the ONLY way to learn that a topic exists is to
+//     have it surface in a recall result.
 //   - WHY the tool writes via plain node:fs instead of dispatching the
 //     native tools (2026-08-28, user decision): the sandbox fence lives
 //     INSIDE the fs backend (@deepseek-ai/dsh-fs-sandbox checkedTarget —
@@ -63,27 +66,24 @@
 //     unusable for automatic capture. A plugin writing its OWN data root is
 //     trusted host behavior (same class as settings.yaml persistence); the
 //     sandbox protects MODEL-controlled paths, and here the model only
-//     supplies content while paths are derived (today's note) or whitelisted
-//     (topic regex, containment under memoryRoot()). Capture now works in
-//     every permission mode. Session provenance comments were REMOVED with
-//     the locator (2026-08-28): they existed for a conversation-replay tool
-//     that was judged not worth building (daily notes suffice; replaying
-//     whole sessions wastes context).
+//     supplies content while paths are tool-derived (today's note, a
+//     whitelisted topic, or an address-resolved dated note). Capture works
+//     in every permission mode.
 //   - config: `dsh-memory:` section in $DSH_HOME/settings.yaml, hot-reloaded
-//     (searchLimit / dailyWindowDays / embeddingBaseUrl / embeddingModel /
-//     autoMemory / longtermAppend), see README.
+//     (memoryRoot / searchLimit / dailyWindowDays / embeddingBaseUrl /
+//     embeddingModel / autoMemory / longtermAppend), see README.
 //
 // Plain ESM JavaScript on purpose. `@deepseek-ai/*` resolves at runtime
 // through Node's parent-walk (the harness installs them in the profile
 // fallback node_modules).
 
 import { join } from 'node:path'
-import { mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import z from '@deepseek-ai/schemastery'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { memoryRoot, sessionSlug, todayStamp, walkMemory } from './store.js'
-import { formatHits, fuseHits, parseKeywords, searchMemory } from './search.js'
+import { memoryRoot, resolveDiary, sessionSlug, todayStamp, walkMemory } from './store.js'
+import { findBlock, formatHits, fuseHits, parseKeywords, searchMemory, splitBlocks } from './search.js'
 import { EmbeddingClient, VectorIndex } from './embed.js'
 
 export const name = 'dsh-memory'
@@ -103,8 +103,13 @@ export const inject = ['tools']
  * `.max()` and plain defaults (a field without `.required()` is optional).
  */
 export const Config = z.object({
-  /** Default result count for memory_search (user decision 2026-08-29: 2 is
-   * enough now that the longtermAppend seat surfaces a long-term block). */
+  /** Memory library root: where the notes live. Empty = the plugin data
+   * root $DSH_HOME/dsh-memory (2026-09-01: a user-visible setting, in place
+   * of the old AGENT_MEMORY_HOME environment override — a library path is
+   * configuration, not a machine-wide invariant). */
+  memoryRoot: z.string(),
+  /** Default result count for recall (user decision 2026-08-29: 2 is enough
+   * now that the longtermAppend seat surfaces a long-term block). */
   searchLimit: z.natural().min(1).max(10).default(2),
   /** Hard window in days for the DAILY notes (user decision 2026-08-24;
    * lowered 90 → 45 days on 2026-08-29 — agent work iterates fast, stale
@@ -143,89 +148,17 @@ const MAX_READ_BYTES = 2 * 1024 * 1024
  * disposal, so the map needs an explicit bound). */
 const MAX_TRACKED_SESSIONS = 256
 
-function memorySearchTool(ctx, getConfig, getVectorIndex) {
-  return {
-    name: 'memory_search',
-    description:
-      'Search the cross-session memory library by literal keyword matching with partial credit per matched keyword. ' +
-      '`keywords` holds up to 5 space-separated terms, most essential FIRST — earlier terms weigh more; distinctive (rare) terms weigh more than generic ones, so pick words the notes actually contain, not synonyms. ' +
-      'Returns block-level hits whose snippet is the whole block; low-scoring hits are dropped. ' +
-      'When a hit is not enough on its own, open its source file and continue from the matching block.',
-    parameters: {
-      keywords: { type: 'string', required: true, description: 'Up to 5 space-separated terms, most essential first — earlier terms weigh more' },
-    },
-    output: {
-      schema: { type: 'string' },
-      render: (_args, value) => [{ type: 'text', text: value }],
-    },
-    async execute(args) {
-      const kw = parseKeywords(String(args.keywords ?? ''))
-      if (kw.primary.length === 0 && kw.secondary.length === 0) throw new Error('memory_search: no usable keywords')
-      // Result count is locked to the configured searchLimit (user decision
-      // 2026-08-22): no agent-facing override.
-      const limit = Math.min(Math.max(Number(getConfig().searchLimit) || 5, 1), MAX_LIMIT)
-      const windowDays = Math.max(0, Math.floor(Number(getConfig().dailyWindowDays) || 0))
-      const entries = walkMemory(windowDays)
-      // gather a candidate pool several times the result window so fusion and
-      // the long-term append seat have room to rank; keyword health (absent /
-      // too-generic terms) is reported back so the model can reword
-      const stats = []
-      const poolSize = Math.min(limit * 3, MAX_LIMIT * 3)
-      const sub = searchMemory(entries, kw.primary, kw.secondary, poolSize, stats)
-      const index = getVectorIndex()
-      let fused = null
-      if (index !== null) {
-        try {
-          const vec = await index.query(entries, [...kw.primary, ...kw.secondary].join(' '), poolSize)
-          fused = fuseHits(sub, vec, poolSize)
-        } catch (error) {
-          // vector search is best-effort: a broken embedding service falls
-          // back to pure substring results instead of failing the tool
-          console.warn(`dsh-memory: vector search unavailable (${error?.message ?? String(error)}), using substring results`)
-        }
-      }
-      const ranked = fused ?? sub
-      const hits = ranked.slice(0, limit)
-      // Long-term append seat (2026-08-25, replaces the 2026-08-24 last-slot
-      // eviction): when NO long-term block made the cut, the best-ranking one
-      // from the candidate pool is APPENDED after the regular results — it
-      // never evicts anything, and works for limit=1 too. The seat is NOT
-      // mandatory: the candidate must exist (i.e. have cleared MIN_SCORE and
-      // ranked into the pool). Off by config `longtermAppend: false`.
-      const isLongterm = (h) => isLongtermRel(h?.rel)
-      if (getConfig().longtermAppend !== false && hits.length > 0 && !hits.some(isLongterm)) {
-        const reserve = ranked.slice(limit).find(isLongterm)
-        if (reserve) hits.push(reserve)
-      }
-      // rows carry ABSOLUTE file paths — the agent cannot be assumed to know
-      // $DSH_HOME/dsh-memory, so hits must be directly usable with the
-      // memory tool's topic targeting or its read output
-      let out = formatHits(hits, memoryRoot())
-      // tell the calling model when its input was trimmed, or when a keyword
-      // matched nothing / matched everything, so the next call rewords
-      const allNotices = [...kw.notices, ...stats]
-      if (allNotices.length > 0) out = `${allNotices.join('; ')}\n${out}`
-      // Long-term guidance is COMPOSITION-DRIVEN (2026-08-29, user decision):
-      // promotion into the topic files happens at REUSE time — the result set
-      // itself decides which hint the model sees, instead of the agent
-      // pre-judging at capture time (被搜到才说明值得长存). The append seat
-      // above participates: an appended long-term block flips the branch.
-      // Empty results carry no hint — there is nothing above to file.
-      if (hits.length > 0) {
-        out += hits.some(isLongterm)
-          ? '\nLong-term topic blocks above are authoritative (never windowed) — correct outdated statements in their topic files in place, and merge topic files that clearly overlap.'
-          : '\nIf a fact above proved worth keeping long term, file it via the memory tool into topics/<topic>.md — update the matching topic file, or start a new one when none matches.'
-      }
-      return out
-    },
-  }
-}
-
 /**
- * The three-mode `memory` file tool (2026-08-28, user decision): a
- * native-read/write/edit-shaped mechanism confined to this plugin's data
- * root. See the module header for why it writes via node:fs directly
- * instead of dispatching the native tools.
+ * The one `memory` tool (2026-09-01, user decision — replaces the
+ * memory_search + three-mode memory pair with a single two-mode tool).
+ *
+ *   mode:"recall"   search + read: `keywords` searches the whole library and
+ *                   returns whole blocks; `date`/`topic` (+ optional
+ *                   `block`) opens one note. Default (no addressing
+ *                   parameter) = today's note for this workspace.
+ *   mode:"remember" create / replace / edit: `content` creates an absent
+ *                   note or fully replaces a read one; `old_string` edits a
+ *                   read one in place.
  *
  * Observation guard, mirroring @deepseek-ai/dsh-fs-observation-policy:
  * per-session records of present {mtimeMs, size} / absent per file. Write on
@@ -237,7 +170,7 @@ function memorySearchTool(ctx, getConfig, getVectorIndex) {
  * the prior-observation requirement: write proceeds only as create, edit is
  * always refused.
  */
-function memoryFileTool() {
+function memoryTool(getConfig, getVectorIndex) {
   /** sessionId -> Map(file -> {kind:'present', mtimeMs, size} | {kind:'absent'}) */
   const observed = new Map()
 
@@ -268,11 +201,7 @@ function memoryFileTool() {
     return info ? { mtimeMs: info.mtimeMs, size: info.size } : null
   }
 
-  const STALE = (file) => `memory: "${file}" changed since it was read — read it again (no-arg memory or mode:"read")`
-
-  /** Content changed under an unchanged size within one mtime tick is not
-   * worth a hash: memory notes grow when edited, so size catches the
-   * realistic races; the CAS exists to force a re-read, not to be a lock. */
+  const STALE = (label) => `memory: ${label} changed since you read it — recall it again`
 
   /** Publish atomically: same-directory temp file + rename, so a crash or
    * concurrent reader never observes a half-written note. */
@@ -283,126 +212,304 @@ function memoryFileTool() {
     renameSync(tmp, file)
   }
 
-  /** Long-term topic names currently on disk (empty when the dir is absent). */
-  function listTopics() {
-    try {
-      return readdirSync(join(memoryRoot(), 'topics'))
-        .filter((n) => n.endsWith('.md'))
-        .map((n) => n.slice(0, -3))
-        .sort()
-    } catch {
-      return []
-    }
-  }
-
   const TOPIC_RE = /^[\p{L}\p{N}_-]+$/u
+  /** Long-term directory names, mirroring walkMemory: anything whose name
+   * does not parse as a date is a long-term directory. A write always lands
+   * in `topics/` (the current layout); a read may address any of them, so
+   * pre-rename `memory/` files stay readable. */
+  const LONGTERM_DIRS = ['topics', 'memory']
 
-  /** Today's note by default; `topic` targets the long-term library file.
-   * The regex plus the join keep every reachable path strictly inside
-   * memoryRoot() — the model only ever supplies a single safe segment. */
-  function resolveTarget(args, exec) {
-    const topic = String(args?.topic ?? '').trim()
-    if (!topic) return join(memoryRoot(), todayStamp(), `${sessionSlug(exec?.agent?.session?.header?.cwd)}.md`)
-    if (!TOPIC_RE.test(topic)) throw new Error(`memory: invalid topic "${topic}" — letters, digits, "-" or "_" only`)
-    return join(memoryRoot(), 'topics', `${topic}.md`)
+  /**
+   * Split a `topic` argument into its long-term directory and file name.
+   * Both the bare form (`windows-env`) and the addressed form
+   * (`topics/windows-env`, as printed in a recall row) are accepted; a bare
+   * topic means `topics/`. Anything with a path separator beyond that one
+   * optional directory, or with characters outside the safe set, is refused
+   * — the model may name a file but never navigate.
+   * @param {string} topic
+   * @returns {ok: true, dir: string, name: string} | {ok: false, error: string}
+   */
+  function splitTopic(topic) {
+    const parts = String(topic).split('/')
+    let dir = 'topics'
+    if (parts.length === 2) {
+      dir = parts[0]
+      parts.shift()
+    } else if (parts.length !== 1) {
+      return { ok: false, error: `memory: invalid topic "${topic}" — at most one directory level` }
+    }
+    const name = parts[0]
+    if (!TOPIC_RE.test(dir) || !TOPIC_RE.test(name)) {
+      return { ok: false, error: `memory: invalid topic "${topic}" — letters, digits, "-" or "_" only` }
+    }
+    if (!LONGTERM_DIRS.includes(dir)) {
+      return { ok: false, error: `memory: "${dir}" is not a long-term directory (${LONGTERM_DIRS.join(' or ')})` }
+    }
+    return { ok: true, dir, name }
   }
 
-  function doRead(file, sessionId, withTopics) {
-    const info = statInfo(file)
-    if (!info) {
-      record(sessionId, file, 'absent')
-      let out = `ABSENT ${file} — create it with memory {mode:"write", content:"<full note text>"}`
-      if (withTopics) {
-        const topics = listTopics()
-        out += topics.length > 0
-          ? `\nExisting long-term topics: ${topics.join(', ')} (target with topic:"<name>")`
-          : '\nLong-term topic files live under topics/<topic>.md (target with topic:"<name>")'
+  /** The configured memory root (hot-reloadable). */
+  function root() {
+    return memoryRoot(getConfig().memoryRoot)
+  }
+
+  /**
+   * Resolve one call's target note.
+   *
+   * `topic` targets the long-term library (topics/<name>.md for writes, any
+   * long-term directory for reads); `date` (+ optional `workspace`)
+   * addresses a diary note. The topic regex and resolveDiary's stamp check +
+   * label matching keep every reachable path strictly inside the memory root
+   * — the model only ever supplies safe segments, never a path.
+   * @returns {{ok: true, file: string, label: string, kind: 'diary'|'topic'}
+   *          | {ok: false, error: string}}
+   */
+  function resolveTarget(args, exec, { write = false } = {}) {
+    const topic = String(args?.topic ?? '').trim()
+    const date = String(args?.date ?? '').trim()
+    const workspace = String(args?.workspace ?? '').trim()
+    if (topic && date) return { ok: false, error: 'memory: pass either topic or date, not both' }
+    if (workspace && !date) return { ok: false, error: 'memory: workspace requires a date' }
+    if (topic) {
+      const parsed = splitTopic(topic)
+      if (!parsed.ok) return parsed
+      // writes always land in the current layout: reading a legacy
+      // `memory/` file is fine, but new content belongs in `topics/`
+      const dir = write ? 'topics' : parsed.dir
+      return { ok: true, file: join(root(), dir, `${parsed.name}.md`), label: `${dir}/${parsed.name}`, kind: 'topic' }
+    }
+    if (date) {
+      const cwd = exec?.agent?.session?.header?.cwd
+      const hit = resolveDiary(root(), date, workspace, cwd)
+      return hit.ok
+        ? { ok: true, file: hit.file, label: `${date} · ${hit.label ?? workspace}`, kind: 'diary' }
+        : { ok: false, error: `memory: ${hit.error}` }
+    }
+    const stamp = todayStamp()
+    const slug = sessionSlug(exec?.agent?.session?.header?.cwd)
+    return { ok: true, file: join(root(), stamp, `${slug}.md`), label: `today's note (${stamp})`, kind: 'diary' }
+  }
+
+  /**
+   * mode:"recall" — search the library, or read one note/block.
+   * A `keywords` argument that is PRESENT but blank is an error (the model
+   * asked to search and gave nothing to search for), while an absent one
+   * means "read".
+   */
+  function doRecall(args, sessionId, exec) {
+    const keywords = String(args?.keywords ?? '').trim()
+    if (args?.keywords != null && keywords === '') throw new Error('memory: no usable keywords')
+    if (keywords) return recallSearch(keywords)
+    const target = resolveTarget(args, exec)
+    if (!target.ok) throw new Error(target.error)
+    return readNote(target, String(args?.block ?? '').trim(), sessionId)
+  }
+
+  /**
+   * Block-level keyword search over the whole corpus, with the
+   * composition-driven long-term guidance appended (2026-08-29).
+   */
+  async function recallSearch(keywords) {
+    const kw = parseKeywords(keywords)
+    if (kw.primary.length === 0 && kw.secondary.length === 0) throw new Error('memory: no usable keywords')
+    // Result count is locked to the configured searchLimit (user decision
+    // 2026-08-22): no agent-facing override.
+    const limit = Math.min(Math.max(Number(getConfig().searchLimit) || 5, 1), MAX_LIMIT)
+    const windowDays = Math.max(0, Math.floor(Number(getConfig().dailyWindowDays) || 0))
+    const entries = walkMemory(windowDays, root())
+    // gather a candidate pool several times the result window so fusion and
+    // the long-term append seat have room to rank; keyword health (absent /
+    // too-generic terms) is reported back so the model can reword
+    const stats = []
+    const poolSize = Math.min(limit * 3, MAX_LIMIT * 3)
+    const sub = searchMemory(entries, kw.primary, kw.secondary, poolSize, stats)
+    const index = getVectorIndex()
+    let fused = null
+    if (index !== null) {
+      try {
+        const vec = await index.query(entries, [...kw.primary, ...kw.secondary].join(' '), poolSize)
+        fused = fuseHits(sub, vec, poolSize)
+      } catch (error) {
+        // vector search is best-effort: a broken embedding service falls
+        // back to pure substring results instead of failing the tool
+        console.warn(`dsh-memory: vector search unavailable (${error?.message ?? String(error)}), using substring results`)
       }
-      return out
+    }
+    const ranked = fused ?? sub
+    const hits = ranked.slice(0, limit)
+    // Long-term append seat (2026-08-25, replaces the 2026-08-24 last-slot
+    // eviction): when NO long-term block made the cut, the best-ranking one
+    // from the candidate pool is APPENDED after the regular results — it
+    // never evicts anything, and works for limit=1 too. The seat is NOT
+    // mandatory: the candidate must exist (i.e. have cleared MIN_SCORE and
+    // ranked into the pool). Off by config `longtermAppend: false`.
+    const isLongterm = (h) => isLongtermRel(h?.rel)
+    if (getConfig().longtermAppend !== false && hits.length > 0 && !hits.some(isLongterm)) {
+      const reserve = ranked.slice(limit).find(isLongterm)
+      if (reserve) hits.push(reserve)
+    }
+    // rows carry ADDRESSES, never paths (2026-09-01) — see the module header
+    let out = formatHits(hits)
+    // tell the calling model when its input was trimmed, or when a keyword
+    // matched nothing / matched everything, so the next call rewords
+    const allNotices = [...kw.notices, ...stats]
+    if (allNotices.length > 0) out = `${allNotices.join('; ')}\n${out}`
+    if (hits.length === 0) return out
+    // how to read a hit further: date + workspace + block, or topic + block
+    out += '\nRead one in full with memory {mode:"recall", date:"<date>", workspace:"<workspace>"} (or topic:"<name>"), optionally block:"<breadcrumb>".'
+    // Long-term guidance is COMPOSITION-DRIVEN (2026-08-29, user decision):
+    // promotion into the topic files happens at REUSE time — the result set
+    // itself decides which hint the model sees, instead of the agent
+    // pre-judging at capture time (被搜到才说明值得长存). The append seat
+    // above participates: an appended long-term block flips the branch.
+    out += hits.some(isLongterm)
+      ? '\nLong-term (topics/) blocks above are authoritative (never windowed) — correct outdated statements in their topic file in place, and merge topic files that clearly overlap.'
+      : '\nIf a fact above proved worth keeping long term, file it with memory {mode:"remember", topic:"<name>", content:"…"} — update the matching topic file, or start a new one when none matches.'
+    return out
+  }
+
+  /** Heading breadcrumbs of a note, for the "no such block" message. */
+  function blockTitles(text) {
+    return splitBlocks(text).map((b) => b.title).filter(Boolean)
+  }
+
+  /**
+   * Read one note (whole file, or one block of it) and record the
+   * observation the guard later checks.
+   */
+  function readNote(target, blockTitle, sessionId) {
+    const info = statInfo(target.file)
+    if (!info) {
+      record(sessionId, target.file, 'absent')
+      // a legacy `memory/<name>` read is offered the topics/ write form:
+      // new content belongs in the current layout
+      const shape = target.kind === 'topic'
+        ? `memory {mode:"remember", topic:"${String(target.label).replace(/^memory\//, '')}", content:"<full note text>"}`
+        : 'memory {mode:"remember", content:"<full note text>"}'
+      return `ABSENT — no ${target.label} note exists yet; create it with ${shape}`
     }
     if (info.size > MAX_READ_BYTES) {
-      record(sessionId, file, 'present')
-      return `${file} · too large to display (${info.size} bytes) — trim it down before further edits`
+      record(sessionId, target.file, 'present')
+      return `${target.label} · too large to display (${info.size} bytes) — trim it down before further edits`
     }
-    const text = readFileSync(file, 'utf8')
-    record(sessionId, file, 'present')
-    return `${file}\n\n${text}\n\n— maintain with memory {mode:"edit", old_string, new_string} or {mode:"write", content} (full replace)`
+    const text = readFileSync(target.file, 'utf8')
+    record(sessionId, target.file, 'present')
+    if (blockTitle) {
+      const block = findBlock(text, blockTitle)
+      if (!block) {
+        const titles = blockTitles(text)
+        return `No block "${blockTitle}" in ${target.label}${titles.length > 0 ? ` — its blocks are: ${titles.join(' | ')}` : ''}`
+      }
+      return `${target.label} · ${block.title}\n\n${block.text}\n\n— maintain it with memory {mode:"remember", old_string, new_string}`
+    }
+    return `${target.label}\n\n${text}\n\n— maintain it with memory {mode:"remember", old_string, new_string}`
   }
 
-  function doWrite(file, content, sessionId) {
+  /**
+   * mode:"remember" — create (content on an absent note), replace (content
+   * on a read note), or edit (old_string on a read note).
+   */
+  function doRemember(args, sessionId, exec) {
+    const hasContent = typeof args?.content === 'string'
+    const hasEdit = typeof args?.old_string === 'string' && args.old_string.length > 0
+    if (hasContent && hasEdit) {
+      throw new Error('memory: pass either content (create/replace) or old_string (edit in place), not both')
+    }
+    if (!hasContent && !hasEdit) {
+      throw new Error('memory: remember needs either content (create/replace) or old_string (edit in place)')
+    }
+    if (String(args?.date ?? '').trim()) {
+      throw new Error('memory: diary notes of past days are read-only — only today\'s note and topics/<name>.md can be written')
+    }
+    const target = resolveTarget(args, exec, { write: true })
+    if (!target.ok) throw new Error(target.error)
+    return hasContent
+      ? writeNote(target, String(args.content), sessionId)
+      : editNote(target, args, sessionId)
+  }
+
+  /** Create or fully replace: the file's own state decides which
+   * (absent → create; present → replace, guarded by prior read + CAS). */
+  function writeNote(target, content, sessionId) {
     const bytes = Buffer.byteLength(content, 'utf8')
-    if (bytes > MAX_WRITE_BYTES) throw new Error(`memory: content is ${bytes} bytes — the ${MAX_WRITE_BYTES}-byte cap keeps notes curated; split the content across topic files`)
-    const current = statInfo(file)
-    const seen = prior(sessionId, file)
+    if (bytes > MAX_WRITE_BYTES) {
+      throw new Error(`memory: content is ${bytes} bytes — the ${MAX_WRITE_BYTES}-byte cap keeps notes curated; split the content across topic files`)
+    }
+    const current = statInfo(target.file)
+    const seen = prior(sessionId, target.file)
     if (current) {
       if (!seen || seen.kind === 'absent') {
-        throw new Error(`memory: "${file}" ${seen ? 'appeared since it was read as absent' : 'already exists'} — read it first (no-arg memory or mode:"read")`)
+        throw new Error(`memory: ${target.label} ${seen ? 'appeared since you read it as absent' : 'already exists'} — recall it first`)
       }
-      if (seen.mtimeMs !== current.mtimeMs || seen.size !== current.size) throw new Error(STALE(file))
+      if (seen.mtimeMs !== current.mtimeMs || seen.size !== current.size) throw new Error(STALE(target.label))
     }
-    atomicWrite(file, content)
-    record(sessionId, file, 'present')
-    return `${file} · ${current ? 'replaced' : 'created'} (${bytes} bytes)`
+    atomicWrite(target.file, content)
+    record(sessionId, target.file, 'present')
+    return `${target.label} · ${current ? 'replaced' : 'created'} (${bytes} bytes)`
   }
 
-  function doEdit(file, args, sessionId) {
-    if (typeof args?.old_string !== 'string' || args.old_string.length === 0) {
-      throw new Error('memory: mode:"edit" requires a non-empty old_string (new_string defaults to "")')
-    }
+  /** Edit in place: unique literal replace, guarded by prior read + CAS. */
+  function editNote(target, args, sessionId) {
     const newValue = args?.new_string == null ? '' : String(args.new_string)
-    const current = statInfo(file)
-    const seen = prior(sessionId, file)
+    const current = statInfo(target.file)
+    const seen = prior(sessionId, target.file)
     if (!current) {
-      throw new Error(`memory: cannot edit "${file}": ${seen ? 'not found' : 'edit requires reading it first (no-arg memory or mode:"read")'}`)
+      throw new Error(`memory: cannot edit ${target.label}: ${seen ? 'not found' : 'editing requires recalling it first'}`)
     }
     if (!seen || seen.kind === 'absent') {
-      throw new Error(`memory: "${file}" ${seen ? 'appeared since it was read as absent' : 'was never read this session'} — read it before editing`)
+      throw new Error(`memory: ${target.label} ${seen ? 'appeared since you read it as absent' : 'was never read this session'} — recall it before editing`)
     }
-    if (seen.mtimeMs !== current.mtimeMs || seen.size !== current.size) throw new Error(STALE(file))
-    const text = readFileSync(file, 'utf8')
+    if (seen.mtimeMs !== current.mtimeMs || seen.size !== current.size) throw new Error(STALE(target.label))
+    const text = readFileSync(target.file, 'utf8')
     const count = text.split(args.old_string).length - 1
-    if (count === 0) throw new Error(`memory: old_string not found in "${file}" — copy it exactly from the read output`)
+    if (count === 0) throw new Error(`memory: old_string not found in ${target.label} — copy it exactly from the recall output`)
     const replaceAll = args?.replace_all === true
     if (count > 1 && !replaceAll) {
-      throw new Error(`memory: ${count} occurrences of old_string in "${file}" — it must be unique, or pass replace_all:true`)
+      throw new Error(`memory: ${count} occurrences of old_string in ${target.label} — it must be unique, or pass replace_all:true`)
     }
-    atomicWrite(file, replaceAll ? text.replaceAll(args.old_string, newValue) : text.replace(args.old_string, newValue))
-    record(sessionId, file, 'present')
-    return `${file} · edited (${count} occurrence${count === 1 ? '' : 's'} replaced)`
+    atomicWrite(target.file, replaceAll ? text.replaceAll(args.old_string, newValue) : text.replace(args.old_string, newValue))
+    record(sessionId, target.file, 'present')
+    return `${target.label} · edited (${count} occurrence${count === 1 ? '' : 's'} replaced)`
   }
 
   return {
     name: 'memory',
     description:
-      "Read and maintain this plugin's memory files under $DSH_HOME/dsh-memory. " +
-      "No arguments reads TODAY's note for this workspace and returns its full text (ABSENT when there is none yet). " +
-      'mode:"write" creates or fully replaces a file with content (refused when the file exists but was not read this session, or changed since that read). ' +
-      'mode:"edit" replaces a literal old_string with new_string (read the file first; old_string must appear exactly once unless replace_all). ' +
-      "The optional topic parameter targets the long-term library file topics/<topic>.md instead of today's note. " +
-      'Read before modify, exactly like the native file tools. ' +
-      'What to record: reusable experience only, never play-by-play — decisions and their reasons, pitfalls and fixes, reusable commands and processes, state changes; ' +
-      'organize under # headings, merge related topics, keep each block concise, and correct outdated statements in place — today\'s note and topic files only; aged diary blocks need no fixing (the window and per-day decay retire them on their own). ' +
+      'Read and maintain the cross-session memory library — reusable experience from earlier sessions (decisions and their reasons, pitfalls and fixes, reusable commands and processes, state changes). ' +
+      'Two modes: ' +
+      '`recall` gets memory out — `keywords` searches the whole library and returns whole blocks; `date` (default: today) or `topic` opens one note, and `block:"<breadcrumb>"` narrows it to one block. ' +
+      '`remember` puts memory in — `content` creates a note that does not exist yet or fully replaces one you just recalled; `old_string`/`new_string` edits a recalled note in place (read before modify, exactly like the native file tools). ' +
+      'Recall rows are addressed by `date` + `workspace` (diary) or `topic` (long term), never by file path: copy them back into `recall` to read a hit in full. Writable notes are today\'s note and `topics/<name>.md`; older diary notes are read-only and retire on their own. ' +
+      'What to record: reusable experience only, never play-by-play. ' +
+      'Organize under # headings, merge related topics, keep each block concise, and correct outdated statements in place — today\'s note and topic files only; aged diary blocks need no fixing (the window and per-day decay retire them on their own). ' +
       'Topic files hold cross-project evergreen experience (environment/tooling lessons, collaboration preferences, general patterns): one topic per file, update the matching file in place and merge near-duplicates instead of spawning parallel ones.',
     parameters: {
-      mode: { type: 'string', description: '"read" (default), "write" or "edit"' },
-      topic: { type: 'string', description: 'Target the long-term topic file topics/<topic>.md instead of today\'s note (short kebab-case names, e.g. "windows-env")' },
-      content: { type: 'string', description: 'Full note text for mode:"write"' },
-      old_string: { type: 'string', description: 'Literal text to replace for mode:"edit"; must match exactly and appear once unless replace_all' },
-      new_string: { type: 'string', description: 'Replacement text for mode:"edit" (an empty string deletes the match)' },
-      replace_all: { type: 'boolean', description: 'mode:"edit": replace every occurrence instead of requiring uniqueness' },
+      mode: {
+        type: 'string',
+        required: true,
+        enum: ['recall', 'remember'],
+        description: '"recall" (search + read) or "remember" (create / replace / edit in place)',
+      },
+      keywords: { type: 'string', description: 'recall: up to 5 space-separated search terms, most essential first — earlier terms weigh more; distinctive (rare) terms beat generic ones' },
+      date: { type: 'string', description: 'recall: which day\'s note to read, YYYY-MM-DD (default: today)' },
+      workspace: { type: 'string', description: 'recall: with `date`, which workspace\'s note to read (a distinguishing fragment of the label in the hit row, e.g. "dsh-memory"); default: this workspace' },
+      topic: { type: 'string', description: 'The long-term topic file, short kebab-case (e.g. "windows-env"): recall reads it, remember writes it' },
+      block: { type: 'string', description: 'recall: read only the block whose heading breadcrumb matches (e.g. "工具链 > pnpm"), copied from a hit row' },
+      content: { type: 'string', description: 'remember: full note text — creates the note when it does not exist, replaces it when you just recalled it' },
+      old_string: { type: 'string', description: 'remember: literal text to replace in place; must match exactly and appear once unless replace_all' },
+      new_string: { type: 'string', description: 'remember: replacement text for old_string (an empty string deletes the match)' },
+      replace_all: { type: 'boolean', description: 'remember: replace every occurrence instead of requiring uniqueness' },
     },
     output: {
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     async execute(args, exec) {
-      const mode = String(args?.mode ?? 'read')
+      const mode = String(args?.mode ?? '').trim()
       const sessionId = owner(exec)
-      const file = resolveTarget(args, exec)
-      if (mode === 'read') return doRead(file, sessionId, args?.topic == null)
-      if (mode === 'write') return doWrite(file, String(args?.content ?? ''), sessionId)
-      if (mode === 'edit') return doEdit(file, args ?? {}, sessionId)
-      throw new Error(`memory: unknown mode "${mode}" — use "read" (default), "write" or "edit"`)
+      if (mode === 'recall') return doRecall(args ?? {}, sessionId, exec)
+      if (mode === 'remember') return doRemember(args ?? {}, sessionId, exec)
+      throw new Error('memory: mode must be "recall" (search + read) or "remember" (create / replace / edit)')
     },
   }
 }
@@ -415,6 +522,7 @@ export function apply(ctx) {
   // plugin activates, and a skipped registration makes settings.mutate fail
   // with "settings namespace ... is not registered".
   const DEFAULTS = {
+    memoryRoot: '',
     searchLimit: 2,
     dailyWindowDays: 45,
     embeddingBaseUrl: '',
@@ -426,6 +534,7 @@ export function apply(ctx) {
   {
     /** Mirror one resolved source onto the live runtime object. */
     const applySource = (source) => {
+      runtime.memoryRoot = String(source.memoryRoot ?? '').trim()
       runtime.searchLimit = source.searchLimit
       runtime.dailyWindowDays = Math.max(0, Math.floor(Number(source.dailyWindowDays) || 0))
       runtime.embeddingBaseUrl = source.embeddingBaseUrl ?? ''
@@ -450,23 +559,26 @@ export function apply(ctx) {
   const getConfig = () => runtime
 
   // lazy vector index: null until embeddingBaseUrl is configured; recreated
-  // when the base URL or model changes (hot-reload safe)
+  // when the base URL, model, or memory root changes (hot-reload safe)
   let vectorIndex = null
   const getVectorIndex = () => {
     if (!runtime.embeddingBaseUrl) return null
+    const base = memoryRoot(runtime.memoryRoot)
     if (
       vectorIndex === null ||
       vectorIndex.baseUrl !== runtime.embeddingBaseUrl ||
-      vectorIndex.model !== runtime.embeddingModel
+      vectorIndex.model !== runtime.embeddingModel ||
+      vectorIndex.root !== base
     ) {
       vectorIndex = new VectorIndex(new EmbeddingClient(runtime.embeddingBaseUrl, runtime.embeddingModel), {
         // persisted signature-keyed vector cache next to the corpus: kills the
         // full-corpus rebuild on the first search after a dsh restart (the
         // cache file sits at the memory root, invisible to walkMemory)
-        cachePath: join(memoryRoot(), '.vector-cache.json'),
+        cachePath: join(base, '.vector-cache.json'),
       })
       vectorIndex.baseUrl = runtime.embeddingBaseUrl
       vectorIndex.model = runtime.embeddingModel
+      vectorIndex.root = base
     }
     return vectorIndex
   }
@@ -497,16 +609,8 @@ export function apply(ctx) {
     return () => fiber.dispose()
   })
 
-  // Model tools: memory_search (retrieval with composition-driven long-term
-  // guidance) + the three-mode `memory` file tool (native-shaped
-  // read/write/edit confined to the plugin data root; description carries
-  // the usage mechanics and organization rules). No host hooks.
-  const tools = [
-    memorySearchTool(ctx, getConfig, getVectorIndex),
-    memoryFileTool(),
-  ]
-  for (const tool of tools) {
-    if (tool === undefined) continue
-    ctx.tools.register(defineTool(tool))
-  }
+  // Model tool: the single two-mode `memory` tool (recall = search + read,
+  // remember = create / replace / edit; the description carries the usage
+  // mechanics and organization rules). No host hooks.
+  ctx.tools.register(defineTool(memoryTool(getConfig, getVectorIndex)))
 }

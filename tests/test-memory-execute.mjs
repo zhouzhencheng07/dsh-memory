@@ -1,7 +1,9 @@
-// End-to-end checks for memory_search's execute() across the two-layer
-// corpus (2026-08-28 revision): single `keywords` parameter + trim notices +
-// the hard daily window + MIN_SCORE filtering + PURE RETRIEVAL (the old
-// success hint is gone) + the CONFIGURABLE ADDITIVE long-term append seat.
+// End-to-end checks for memory {mode:"recall", keywords:…} across the
+// two-layer corpus (2026-09-01: memory_search is gone, retrieval is the
+// `recall` mode of the single memory tool): trim notices + the hard daily
+// window + MIN_SCORE filtering + the CONFIGURABLE ADDITIVE long-term append
+// seat, plus the new ADDRESS output (no file paths — a row is the key you
+// feed back into recall).
 // Boots src/index.js against the @deepseek-ai/* stubs, points $MEM_TEST_HOME
 // at a temp sandbox seeded with layered notes, and drives the tool directly.
 // Usage: node --import ./tests/register-mem-test.mjs tests/test-memory-execute.mjs
@@ -40,54 +42,67 @@ function boot(settings) {
     inject: () => {},
     effect: () => {},
   })
-  const search = registered.find((t) => t.name === 'memory_search')
-  assert.ok(search, 'memory_search registered')
-  return search
+  const memory = registered.find((t) => t.name === 'memory')
+  assert.ok(memory, 'the single memory tool is registered')
+  assert.equal(registered.length, 1)
+  return memory
 }
 
 /** Count result rows in formatted output (each row starts with `- [`). */
-const rowCount = (out) => out.split('- [' ).length - 1
+const rowCount = (out) => out.split('- [').length - 1
 
 // --- default boot: searchLimit 5 ----------------------------------------------
-const search = boot({ searchLimit: 5 })
-assert.deepEqual(Object.keys(search.parameters).sort(), ['keywords'], 'single keywords parameter')
-assert.equal(search.parameters.keywords.required, true)
+const memory = boot({ searchLimit: 5 })
 
 // --- single-keyword basics ------------------------------------------------------
-const rootPrefix = process.env.MEM_TEST_HOME.replaceAll('\\', '/') + '/dsh-memory/'
-const out1 = await search.execute({ keywords: 'alphaunique' })
+const out1 = await memory.execute({ mode: 'recall', keywords: 'alphaunique' })
 assert.match(out1, /今日流水/)
-assert.ok(out1.includes(`${rootPrefix}${dayStamp(0)}/note.md#`), `hits must carry ABSOLUTE file paths, got:\n${out1}`)
-assert.ok(out1.includes('file it via the memory tool into topics/<topic>.md'), 'daily-only hits end with the FILE-NEW promotion hint')
+// 2026-09-01: rows carry an ADDRESS (date · workspace), never a path
+assert.match(out1, new RegExp(`- \\[${dayStamp(0)} · note\\] 今日流水`), `hits must carry an address, got:\n${out1}`)
+assert.ok(!out1.includes(home.replaceAll('\\', '/')), `output must not leak the library path, got:\n${out1}`)
+assert.ok(!/\.md/.test(out1.split('\n').find((l) => l.startsWith('- [')) ?? ''), 'the row itself must not name a .md file')
+assert.match(out1, /mode:"recall", date:/, 'rows tell the model how to read a hit in full')
+assert.match(out1, /mode:"remember", topic:"<name>"/, 'daily-only hits end with the FILE-NEW promotion hint')
 assert.ok(!out1.includes('authoritative'), 'file-new branch excludes the authoritative branch')
 
-const outCap = await search.execute({ keywords: 'alphaunique extra1 extra2 extra3 extra4 extra5 extra6 extra7 extra8' })
+const outCap = await memory.execute({ mode: 'recall', keywords: 'alphaunique extra1 extra2 extra3 extra4 extra5 extra6 extra7 extra8' })
 assert.match(outCap, /^keywords capped to 5 \(dropped: extra5, extra6, extra7, extra8\)/)
 
-await assert.rejects(() => search.execute({ keywords: '   ' }), /no usable keywords/)
+await assert.rejects(() => memory.execute({ mode: 'recall', keywords: '   ' }), /no usable keywords/)
 
 // --- hard daily window (default 90) -------------------------------------------
-const outOld = await search.execute({ keywords: 'gammaunique' })
+const outOld = await memory.execute({ mode: 'recall', keywords: 'gammaunique' })
 assert.ok(outOld.includes('No memory found.'), '200-day-old diary is outside the 90-day window')
 assert.match(outOld, /no note contains "gammaunique"/, 'the absent keyword is reported back for rewording')
-assert.ok(!outOld.includes('topics/<topic>'), 'empty results carry no promotion hint')
+assert.ok(!outOld.includes('mode:"remember"'), 'empty results carry no promotion hint')
 
-const outMid = await search.execute({ keywords: 'betaunique' })
+const outMid = await memory.execute({ mode: 'recall', keywords: 'betaunique' })
 assert.match(outMid, /十天前/, '10-day-old diary stays inside the window')
 
 // --- long-term participation: first place is already long-term ------------------
-const outLong = await search.execute({ keywords: 'deltaunique' })
-assert.match(outLong, /topics\/memory\.md/)
+const outLong = await memory.execute({ mode: 'recall', keywords: 'deltaunique' })
+assert.match(outLong, /- \[topics\/memory\] 用户环境/, `long-term rows carry the topic address, got:\n${outLong}`)
 assert.ok(outLong.includes('authoritative'), 'long-term block among hits ⇒ authoritative branch (2026-08-29)')
-assert.ok(!outLong.includes('file it via the memory tool'), 'authoritative branch excludes the file-new branch')
+assert.ok(!outLong.includes('file it with memory'), 'authoritative branch excludes the file-new branch')
 assert.equal(rowCount(outLong), 1, 'long-term first place must NOT gain a duplicate append seat')
 
 // --- MIN_SCORE floor: weak partial matches never surface ------------------------
 seed([dayStamp(60)], 'low.md', '# 陈旧旁证\n\nzombietoken 出现在六十天前的日记里。\n')
 seed([dayStamp(0)], 'anchor.md', '# 今日锚\n\nfreshanchor 在今天的日记里。\n')
-const outWeak = await search.execute({ keywords: 'freshanchor p1 p2 zombietoken' })
+const outWeak = await memory.execute({ mode: 'recall', keywords: 'freshanchor p1 p2 zombietoken' })
 assert.match(outWeak, /今日锚/, 'the strong primary hit still surfaces')
 assert.ok(!outWeak.includes('陈旧旁证'), 'aged secondary-only noise is dropped by MIN_SCORE')
+
+// --- a hit row is a working read key: feed it back into recall ------------------
+// This is the whole point of the address output (2026-09-01): the model has no
+// path, so date + workspace + block must reopen exactly what the row showed.
+const hitRow = outWeak.split('\n').find((l) => l.startsWith('- ['))
+const addr = /^- \[([^\]]+)\] (.*?) \(score/.exec(hitRow)
+assert.ok(addr, `row must parse as an address, got: ${hitRow}`)
+const [datePart, workspacePart] = addr[1].split(' · ')
+const blockPart = addr[2]
+const readBack = await memory.execute({ mode: 'recall', date: datePart, workspace: workspacePart, block: blockPart })
+assert.match(readBack, /freshanchor/, `date+workspace+block must reopen the hit, got:\n${readBack}`)
 
 // --- store-level window semantics ----------------------------------------------
 const { walkMemory } = await import('../src/store.js')
@@ -107,8 +122,8 @@ assert.equal(walkMemory('nonsense').length, walkMemory(0).length, 'non-numeric w
 seed([dayStamp(0)], 'r-a.md', '# 近水楼台\n\nreservetoken 出现在今天的日记。reservetoken 再现一次。\n')
 seed([dayStamp(1)], 'r-b.md', '# 昨日流水\n\nreservetoken 出现在昨天的日记。reservetoken 再现一次。\n')
 seed(['topics'], 'memory-append.md', '# 追加测试\n\nreservetoken 出现在长期记忆里，永不衰减。\n')
-const search2 = boot({ searchLimit: 2 })
-const outAppend = await search2.execute({ keywords: 'reservetoken' })
+const memory2 = boot({ searchLimit: 2 })
+const outAppend = await memory2.execute({ mode: 'recall', keywords: 'reservetoken' })
 assert.match(outAppend, /近水楼台/, 'best diary keeps slot 1')
 assert.match(outAppend, /昨日流水/, 'second diary KEEPS slot 2 (additive, not evicting)')
 assert.match(outAppend, /追加测试/, 'best-ranking long-term block appended after the regular results')
@@ -116,19 +131,35 @@ assert.equal(rowCount(outAppend), 3)
 assert.ok(outAppend.includes('authoritative'), 'appended long-term seat flips the hint to the authoritative branch')
 
 // off switch: pure top-N
-const searchOff = boot({ searchLimit: 2, longtermAppend: false })
-const outOff = await searchOff.execute({ keywords: 'reservetoken' })
+const memoryOff = boot({ searchLimit: 2, longtermAppend: false })
+const outOff = await memoryOff.execute({ mode: 'recall', keywords: 'reservetoken' })
 assert.match(outOff, /近水楼台/)
 assert.match(outOff, /昨日流水/)
 assert.ok(!outOff.includes('追加测试'), 'longtermAppend:false disables the seat entirely')
 assert.equal(rowCount(outOff), 2)
 
 // limit 1: the seat now works additively where the old eviction could not
-const search3 = boot({ searchLimit: 1 })
-const outSolo = await search3.execute({ keywords: 'reservetoken' })
+const memory3 = boot({ searchLimit: 1 })
+const outSolo = await memory3.execute({ mode: 'recall', keywords: 'reservetoken' })
 assert.match(outSolo, /近水楼台/, 'limit 1 keeps the top diary')
 assert.match(outSolo, /追加测试/, 'limit 1 gains the appended long-term block')
 assert.equal(rowCount(outSolo), 2)
 
-console.log('execute-layer checks passed (params, notices, window, MIN_SCORE, composition-driven long-term hint, store filtering, additive long-term seat)')
+// --- recall with keywords ignores the addressing parameters ----------------------
+const outBoth = await memory2.execute({ mode: 'recall', keywords: 'reservetoken', topic: 'ignored' })
+assert.equal(rowCount(outBoth), 3, 'keywords win: the search path runs, address params are not mixed in')
+
+// --- memoryRoot setting (2026-09-01: a setting, not an env var) ------------------
+const customRoot = mkdtempSync(join(tmpdir(), 'dsh-mem-custom-'))
+mkdirSync(join(customRoot, 'topics'), { recursive: true })
+writeFileSync(join(customRoot, 'topics', 'elsewhere.md'), '# 别处\n\ncustomroottoken 只存在于自定义根目录。\n')
+const memoryRooted = boot({ searchLimit: 2, memoryRoot: customRoot })
+const outCustom = await memoryRooted.execute({ mode: 'recall', keywords: 'customroottoken' })
+assert.match(outCustom, /别处/, 'the memoryRoot setting relocates the whole library')
+assert.match(outCustom, /- \[topics\/elsewhere\]/, 'rows stay path-free under a custom root too')
+assert.ok(!outCustom.includes('reservetoken'), 'the default root is NOT searched alongside it')
+assert.ok(!outCustom.includes(customRoot.replaceAll('\\', '/')), 'the custom root must not leak either')
+
+console.log('execute-layer checks passed (recall params, notices, window, MIN_SCORE, address output, hit-row read-back, composition-driven long-term hint, store filtering, additive long-term seat, memoryRoot setting)')
 rmSync(home, { recursive: true, force: true })
+rmSync(customRoot, { recursive: true, force: true })

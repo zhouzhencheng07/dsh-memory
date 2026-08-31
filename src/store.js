@@ -18,21 +18,20 @@
 //                                                   memory/ files keep
 //                                                   showing up in search.
 //
-// Root resolution (2026-08-29, cross-agent sharing): AGENT_MEMORY_HOME wins
-// when set — the SAME environment variable the agent-memory skill
-// (skill/agent-memory) uses, so dsh and other agents converge on one library.
-// Fallback is the plugin data root $DSH_HOME/dsh-memory, which keeps every
-// pre-env deployment (and the dev environment, where sync-dev.ps1 pins the
-// var inline) exactly where it was. Changing the variable needs a dsh
-// restart: the path is resolved per call but a running process keeps the env
-// it was launched with.
+// Root resolution (2026-09-01, user decision — configurable, NOT an
+// environment variable): the `memoryRoot` setting of the `dsh-memory:`
+// section wins when non-empty, otherwise the plugin data root
+// $DSH_HOME/dsh-memory. The previous AGENT_MEMORY_HOME override is GONE: a
+// library path is user-facing configuration and belongs where the user can
+// see and edit it (the settings card), not in an invisible machine-wide
+// variable that also differs per shell.
 //
-// Write path (2026-08-28, user decision — see index.js header): the
-// three-mode `memory` tool does all file work itself via node:fs (trusted
-// plugin data-root writes, native-shaped observation guard). The session
-// provenance comment was removed with the 2026-08-23 locator design it
-// belonged to, so this file keeps only path/slug/date derivation and the
-// walk used by memory_search — no write helpers, no comment merging.
+// Write path (2026-08-28, user decision — see index.js header): the `memory`
+// tool does all file work itself via node:fs (trusted plugin data-root
+// writes, native-shaped observation guard). The session provenance comment
+// was removed with the 2026-08-23 locator design it belonged to, so this
+// file keeps only path/slug/date derivation, the walk used by recall, and
+// the diary address resolution — no write helpers, no comment merging.
 
 import { existsSync, readdirSync, statSync, readFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
@@ -44,14 +43,16 @@ export function pluginRoot() {
 }
 
 /**
- * Memory root: the shared cross-agent library. AGENT_MEMORY_HOME (the same
- * variable the agent-memory skill resolves) wins when set; otherwise the
- * plugin data root — identical to the pre-env behavior, so a missing
- * variable can never split the library.
+ * Memory root: the configured library. `memoryRoot` (the `dsh-memory:`
+ * settings section) wins when non-empty — a user-visible, hot-reloadable
+ * setting — otherwise the plugin data root $DSH_HOME/dsh-memory, the same
+ * default every pre-setting deployment already used.
+ * @param {string} [configured] - the `memoryRoot` setting value
+ * @returns {string}
  */
-export function memoryRoot() {
-  const shared = String(process.env.AGENT_MEMORY_HOME ?? '').trim()
-  return shared || pluginRoot()
+export function memoryRoot(configured) {
+  const custom = String(configured ?? '').trim()
+  return custom || pluginRoot()
 }
 
 /** Local date stamp YYYY-MM-DD. */
@@ -85,6 +86,72 @@ export function readMemoryFile(file, maxBytes = 2 * 1024 * 1024) {
   return readFileSync(file, 'utf8')
 }
 
+/** True when `value` is an exactly YYYY-MM-DD date stamp. Every diary
+ * address takes one, so validating here is what keeps a model-supplied
+ * string from escaping the memory root as a path. */
+export function isDateStamp(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value ?? '')) && Number.isFinite(Date.parse(String(value)))
+}
+
+/**
+ * Workspace token as the model sees it: the daily file name with its slug
+ * bookends and extension stripped (`--D-Project-x--.md` → `D-Project-x`).
+ * This is the value recall prints and the value the model feeds back into
+ * `workspace` — a label, never a path, so it can never address anything
+ * outside the library.
+ * @param {string} name - daily file name (with or without `.md`)
+ * @returns {string}
+ */
+export function workspaceLabel(name) {
+  return String(name ?? '').replace(/\.md$/i, '').replace(/^-+/, '').replace(/-+$/, '')
+}
+
+/**
+ * Resolve a diary address (<root>/<date>/<slug>.md) from the label recall
+ * printed. Resolution is deliberately FORGIVING — the label can be a long
+ * mouthful (`D-Project-dsh-plugin-dsh-memory`) and the model may copy only
+ * a distinguishing fragment:
+ *   1. an exact `--<label>--.md` file wins;
+ *   2. otherwise the label is matched as a case-insensitive SUBSTRING of the
+ *      day's file names, provided it matches exactly one;
+ *   3. several matches are an ERROR that lists them (an ambiguous address
+ *      must never silently resolve to the wrong workspace).
+ * `label` empty/undefined resolves to the CALLING SESSION's own workspace
+ * (the default diary file), which is why the common case needs no label.
+ * @param {string} root - memory root
+ * @param {string} date - YYYY-MM-DD
+ * @param {string} [label] - workspace token; empty = this session's
+ * @param {string} [cwd] - this session's cwd (only used when label is empty)
+ * @returns {{ok: true, file: string} | {ok: false, error: string}}
+ */
+export function resolveDiary(root, date, label, cwd) {
+  if (!isDateStamp(date)) return { ok: false, error: `date must be exactly YYYY-MM-DD (got "${date}")` }
+  const dir = join(root, date)
+  const raw = String(label ?? '').trim()
+  if (!raw) return { ok: true, file: join(dir, `${sessionSlug(cwd)}.md`), label: workspaceLabel(sessionSlug(cwd)) }
+  // normalize the label the same way workspaceLabel does, so any of the
+  // printed form (`D-Project-x`), the raw file name (`--D-Project-x--.md`)
+  // and a distinguishing fragment all resolve
+  const wanted = workspaceLabel(raw).toLocaleLowerCase()
+  let names = []
+  try {
+    names = readdirSync(dir).filter((n) => n.endsWith('.md'))
+  } catch {
+    return { ok: false, error: `no notes for ${date}` }
+  }
+  // the returned path always reuses the name AS IT EXISTS ON DISK: comparing
+  // case-insensitively is fine, but rebuilding the path from a lowercased
+  // label would point at a nonexistent file on a case-sensitive filesystem
+  const exact = names.find((n) => workspaceLabel(n).toLocaleLowerCase() === wanted)
+  if (exact !== undefined) return { ok: true, file: join(dir, exact), label: workspaceLabel(exact) }
+  const loose = names.filter((n) => workspaceLabel(n).toLocaleLowerCase().includes(wanted))
+  if (loose.length === 1) return { ok: true, file: join(dir, loose[0]), label: workspaceLabel(loose[0]) }
+  if (loose.length > 1) {
+    return { ok: false, error: `"${raw}" matches ${loose.length} workspaces on ${date}: ${loose.map(workspaceLabel).join(', ')} — give a more specific workspace` }
+  }
+  return { ok: false, error: `no note for ${date} in workspace "${raw}"${names.length > 0 ? ` (${names.map(workspaceLabel).join(', ')})` : ''}` }
+}
+
 /**
  * Walk every markdown file under the memory root. Two layers:
  *   - dated subdirectories (YYYY-MM-DD/<topic>.md): the ephemeral daily
@@ -98,11 +165,11 @@ export function readMemoryFile(file, maxBytes = 2 * 1024 * 1024) {
  * rel paths use forward slashes relative to memoryRoot()
  * (YYYY-MM-DD/<topic>.md or topics/<topic>.md).
  * @param {number} [windowDays=0] - hard window for dated notes in days; 0 disables it
+ * @param {string} [root=memoryRoot()] - memory root (the configured one)
  * @returns {Array<{rel: string, date: string, kind: 'note', text: string}>}
  */
-export function walkMemory(windowDays = 0) {
+export function walkMemory(windowDays = 0, root = memoryRoot()) {
   const out = []
-  const root = memoryRoot()
   if (!existsSync(root) || !statSync(root).isDirectory()) return out
   const cutoff = Number(windowDays) > 0 ? Date.now() - Number(windowDays) * 86400000 : null
   for (const day of readdirSync(root, { withFileTypes: true })) {

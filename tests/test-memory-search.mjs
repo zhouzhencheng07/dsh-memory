@@ -1,4 +1,4 @@
-// Positional keyword scoring verification for memory_search (2026-08-25):
+// Positional keyword scoring verification for memory recall (2026-08-25):
 //   ONE `keywords` string parsed by parseKeywords() — the FIRST 3 terms score
 //   PRIMARY_WEIGHT per hit, the next 2 SECONDARY_WEIGHT — partial credit per
 //   matched keyword, no hard AND gate; blocks scoring below MIN_SCORE never
@@ -13,6 +13,9 @@ import {
   parseKeywords,
   looseNormalize,
   occurrenceCount,
+  hitAddress,
+  findBlock,
+  splitHitRel,
   MAX_PRIMARY_KEYWORDS,
   MAX_SECONDARY_KEYWORDS,
   PRIMARY_WEIGHT,
@@ -154,18 +157,17 @@ check('coverage: absent/wrong keywords do not inflate the bar', () => {
 })
 
 // --- real-corpus acceptance: the exact query that missed on 2026-08-22 -------
-// The library root follows AGENT_MEMORY_HOME (cross-agent sharing), so the
-// real corpus is located dynamically; when no library is found the check is
-// SKIPPED (the acceptance run needs a real library, not a synthetic one).
+// The library root is configurable now (2026-09-01), so the real corpus is
+// located by probing the known candidates; when no library is found the check
+// is SKIPPED (the acceptance run needs a real library, not a synthetic one).
 check('REAL corpus: positional-keyword query still surfaces the appendd fix-record block', () => {
   const candidates = [
-    ...(process.env.AGENT_MEMORY_HOME ? [process.env.AGENT_MEMORY_HOME] : []),
     join('D:', '\\agent\\memory'),
     join('D:', '\\agent\\.dsh\\dsh-memory'),
   ]
   const root = candidates.find((c) => existsSync(join(c, '2026-08-22')))
   if (!root) {
-    console.log('     → SKIPPED: no real memory library found (set AGENT_MEMORY_HOME)')
+    console.log('     → SKIPPED: no real memory library found (point the memoryRoot setting at one)')
     return
   }
   const dir = join(root, '2026-08-22')
@@ -225,6 +227,40 @@ check('boundary matching: log no longer matches catalog/login; CJK substring unc
 check('search-level: an alphabetic keyword glued into another word is not a hit', () => {
   const entries = [entry('x.md', '# 目录\n\n这个 catalog 里什么都没有。')]
   assert.deepEqual(searchMemory(entries, ['log'], [], 5), [])
+})
+
+// --- hit addressing (2026-09-01): rows carry an address, never a path ----------
+check('hitAddress: diary → "date · workspace", long-term → "topics/<name>"', () => {
+  assert.equal(hitAddress('2026-08-20/--D-Project-x--.md#工具链 > pnpm'), '2026-08-20 · D-Project-x')
+  assert.equal(hitAddress('2026-08-20/--D-Project-x--.md'), '2026-08-20 · D-Project-x')
+  assert.equal(hitAddress('topics/windows-env.md#pnpm'), 'topics/windows-env')
+  assert.equal(hitAddress('topics/windows-env.md'), 'topics/windows-env')
+  // pre-rename legacy long-term files stay addressable the same way
+  assert.equal(hitAddress('memory/old.md#x'), 'memory/old')
+})
+
+check('splitHitRel keeps a breadcrumb containing "#" intact', () => {
+  assert.deepEqual(splitHitRel('topics/a.md#甲 > 乙'), { file: 'topics/a.md', block: '甲 > 乙' })
+  assert.deepEqual(splitHitRel('2026-08-20/n.md'), { file: '2026-08-20/n.md', block: '' })
+})
+
+check('findBlock resolves a breadcrumb and is whitespace/case tolerant', () => {
+  const text = '# 工具链\n\n## pnpm\n\n正文在此。\n\n## node\n\n别的正文。\n'
+  assert.equal(findBlock(text, '工具链 > pnpm').text.includes('正文在此'), true)
+  assert.equal(findBlock(text, '  工具链 > PNPM ').text.includes('正文在此'), true, 'trimmed + case-insensitive')
+  assert.equal(findBlock(text, '工具链 > 不存在'), null)
+  assert.equal(findBlock(text, ''), null, 'an empty breadcrumb is not a match')
+})
+
+check('the address printed for a hit resolves that exact block again', () => {
+  // the round trip the model performs: search → copy the row → recall it
+  const text = '# 工具链\n\n## pnpm\n\nreservetoken 的正文。\n'
+  const entries = [entry('note.md', text, '2026-08-20')]
+  const hits = searchMemory(entries, ['reservetoken'], [], 5)
+  assert.equal(hits.length, 1)
+  const { block } = splitHitRel(hits[0].rel)
+  assert.equal(block, '工具链 > pnpm')
+  assert.ok(findBlock(text, block).text.includes('reservetoken'), 'the printed breadcrumb reopens the hit')
 })
 
 console.log(`\n${passed} checks passed`)

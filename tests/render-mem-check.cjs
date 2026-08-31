@@ -23,6 +23,9 @@ const reactStub = {
   },
   useEffect: () => undefined,
   useRef: (v) => ({ current: v }),
+  // 2026-09-01: 语言切换响应（<html lang> MutationObserver + store version）——
+  // 桩直接返回快照（渲染期读一次），不模拟真正的 re-render 循环
+  useSyncExternalStore: (_subscribe, get) => get(),
   Fragment: function Fragment() {},
 };
 const jsxRuntimeStub = {
@@ -53,7 +56,22 @@ const sandbox = {
     },
   },
   console,
+  // 2026-09-01: bundle 的 locale 判定层（<html lang> 权威 + MutationObserver
+  // 监听）在沙箱里也需要有实体，否则渲染路径与真实环境不一致
+  document: {
+    documentElement: { lang: "zh-CN" },
+    querySelector: () => null,
+    createElement: () => ({ dataset: {}, appendChild() {} }),
+    head: { appendChild() {} },
+  },
+  MutationObserver: function (callback) { this.callback = callback; },
 };
+class MutationObserverStub {
+  constructor(callback) { this.callback = callback; }
+  observe() {}
+  disconnect() {}
+}
+sandbox.MutationObserver = MutationObserverStub;
 
 function requireStub(name) {
   if (name === "react") return reactStub;
@@ -89,11 +107,12 @@ const MemoryCard = registered.component;
 let failed = 0;
 const check = (label, ok) => { console.log((ok ? "PASS  " : "FAIL  ") + label); if (!ok) failed++; };
 
-// MemoryCard 的第 5 个 useState 是 open（折叠态，默认 false）——预置为 true
-// 让字段行参与渲染（折叠时只有 header）。
+// MemoryCard 的第 5 个 useState 是 open（折叠态，默认 false）——在每次渲染前把
+// 它预置为 true 让字段行参与渲染（折叠时只有 header）。stateSeq 逐渲染递增，
+// 不能用固定索引：open 状态位 = 本次渲染将分配的第 5 个状态（stateSeq + 4）。
 const renderCard = () => {
   callLog = [];
-  stateStore.set(4, true);
+  stateStore.set(stateSeq + 4, true);
   try {
     return MemoryCard({ scope: scopeStub });
   } catch (error) {
@@ -111,16 +130,30 @@ const checkboxes = inputs.filter(([, , props]) => props?.type === "checkbox");
 // 2026-08-29: autoMemory 开关随每轮提醒一起恢复，bool 字段共 2 个
 check("bool 字段渲染为 checkbox（autoMemory + longtermAppend ≥2 个）", checkboxes.length >= 2);
 const rowText = callLog.map(([, , props]) => props?.children).flat(10).filter((x) => typeof x === "string").join(" ");
-check("字段文案存在（记忆库根目录）", rowText.includes("记忆库根目录") || rowText.includes("Memory library root"));
-check("字段文案存在（每轮记忆提醒）", rowText.includes("每轮记忆提醒") || rowText.includes("Per-turn memory reminder"));
+// 2026-09-01: 沙箱 document.documentElement.lang="zh-CN" —— 语言判定走 <html lang>
+// 权威（非 navigator.language），因此此处必须渲染 zh 文案
+check("字段文案为中文（判定走 <html lang>）", rowText.includes("记忆库根目录") && rowText.includes("每轮记忆提醒"));
 check("字段文案存在（长期块追加返回）", rowText.includes("长期块追加返回") || rowText.includes("Append long-term block"));
-// 2026-09-01: memoryRoot 是第一个字段（text 类型）
+// 2026-09-01: memoryRoot 是第一个字段（text 类型），恢复默认/空值显示占位默认值
 const texts = inputs.filter(([, , props]) => props?.type === "text");
 check("text 字段含 memoryRoot（共 4 个 text：memoryRoot/baseUrl/model + 数值类）", texts.length >= 4);
+const memoryRootInput = inputs.find(([, , props]) => props?.id === "dsh-memory-memoryRoot");
+check("memoryRoot 空值有占位默认（$DSH_HOME/dsh-memory），不把默认路径误存成值", memoryRootInput && memoryRootInput[2].placeholder === "$DSH_HOME/dsh-memory" && memoryRootInput[2].value === "");
 
 // 第二次渲染（模拟文档提交后的重读路径）也不应抛异常
 out = renderCard();
 check("二次渲染无异常", !!out && typeof out === "object");
+
+// --- 语言切换响应（2026-09-01）：<html lang> 变化 → 文案切换 -----------------
+// 真实环境：MutationObserver 把 <html lang> 改写 bump 成 store version →
+// useSyncExternalStore 通知组件 re-render → t() 现读 <html lang> 取新语言。
+// 桩无法模拟 re-render 循环，此处直接改 lang 后手动重渲染，验证的是同一渲染
+// 路径上的关键断言：t() 在渲染期现读 <html lang>（非模块加载时钉死）。
+sandbox.document.documentElement.lang = "en-US";
+out = renderCard();
+const enText = callLog.map(([, , props]) => props?.children).flat(10).filter((x) => typeof x === "string").join(" ");
+check("切到英文后文案为英文（t() 现读 <html lang>）", enText.includes("Memory library root") && enText.includes("Per-turn memory reminder"));
+sandbox.document.documentElement.lang = "zh-CN";
 
 console.log(failed === 0 ? "ALL RENDER OK" : `${failed} FAIL`);
 process.exit(failed === 0 ? 0 : 1);

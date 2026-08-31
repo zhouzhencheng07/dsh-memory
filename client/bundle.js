@@ -95,8 +95,45 @@ window.__ModuleLoader__.load({
       expand: "展开设置",
       collapse: "收起设置"
     };
-    const lang = typeof navigator !== "undefined" && /^zh/i.test(navigator.language || "") ? zh : en;
-    const t = (key) => lang[key] ?? key;
+    /** 语言判定：只认 DSH 的 locale 权威 —— <html lang> 由 dsh-client-locale 的
+     *  syncDocumentLanguage 在启动与每次切换时同步（设置→通用→语言），页面内
+     *  恒有值（服务端标记初始为 en）。不设 navigator.language 回退：中文系统
+     *  浏览器语言恒为 zh-CN，回退会把 DSH 已切到英文的界面锁回中文（dsh-kit
+     *  实测过的回归根源）；且 DSH 自身无浏览器语言匹配时的兜底语义就是英文
+     *  （FALLBACK_LOCALE），插件保持一致即可。非 zh 一律按英文渲染。 */
+    function resolveZh() {
+      if (typeof document === "undefined" || !document.documentElement) return false;
+      return /^zh/i.test(document.documentElement.lang || "");
+    }
+    // 每次渲染现读现判，不在模块加载时钉死：DSH 的 locale 服务异步把语言同步到
+    // <html lang>（syncDocumentLanguage），时机晚于本 bundle 顶层执行，一次性
+    // 求值会拿到旧值而把界面锁死在英文。
+    const lang = () => (resolveZh() ? zh : en);
+    const t = (key) => lang()[key] ?? key;
+
+    // 语言切换响应：外部 store + <html lang> 的 MutationObserver。DSH 异步改写
+    // <html lang> 后 bump version，组件经 useSyncExternalStore 订阅 version，
+    // 变化即 re-render，届时 t() 已读到新语言。与 settings scope 快照同一订阅
+    // 模式（照 dsh-kit 的做法，2026-09-01）。
+    const localeStore = { version: 0, listeners: new Set() };
+    const subscribeLocale = (fn) => {
+      localeStore.listeners.add(fn);
+      return () => localeStore.listeners.delete(fn);
+    };
+    const getLocaleVersion = () => localeStore.version;
+    if (typeof document !== "undefined" && typeof MutationObserver !== "undefined") {
+      let lastLang = document.documentElement.lang || "";
+      new MutationObserver(() => {
+        const cur = document.documentElement.lang || "";
+        if (cur !== lastLang) {
+          lastLang = cur;
+          localeStore.version++;
+          for (const l of localeStore.listeners) {
+            try { l(); } catch (_e) { /* ignore */ }
+          }
+        }
+      }).observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
+    }
 
     /**
      * Field conversion specs, mirroring the official CardForm specs.
@@ -110,6 +147,9 @@ window.__ModuleLoader__.load({
         kind: "text",
         label: "memoryRoot",
         hint: "memoryRootHint",
+        // 恢复默认/未配置时显示为空字符串值，占位符呈现"默认是什么"而不把
+        // 运行时路径误存成字面量设置（保存仍是清空=用默认）。
+        placeholder: "$DSH_HOME/dsh-memory",
         format: (value) => (typeof value === "string" ? value : ""),
         parse: (text) => {
           const trimmed = text.trim();
@@ -233,6 +273,10 @@ window.__ModuleLoader__.load({
       const [saving, setSaving] = react.useState(false);
       const [failed, setFailed] = react.useState(false);
       const [open, setOpen] = react.useState(false);
+      // 语言版本订阅：<html lang> 改变（DSH 设置里切换中英文）→ store version
+      // bump → 本组件 re-render，届时 t() 现读 `lang()` 取到新语言。返回值本身
+      // 不直接使用（订阅即是全部效果）。
+      react.useSyncExternalStore(subscribeLocale, getLocaleVersion);
 
       react.useEffect(() => scope.subscribe(() => setSnapshot(scope.getSnapshot())), [scope]);
 
@@ -379,6 +423,7 @@ window.__ModuleLoader__.load({
               style: { ...styles.input, ...(state.invalid ? styles.inputInvalid : {}) },
               type: "text",
               ...(spec.kind === "number" ? { inputMode: "numeric" } : {}),
+              ...(spec.placeholder !== undefined ? { placeholder: spec.placeholder } : {}),
               ...(state.invalid ? { "aria-invalid": true } : {}),
               value: state.text,
               disabled: !writable,

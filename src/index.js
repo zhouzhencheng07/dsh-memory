@@ -546,8 +546,16 @@ export function apply(ctx) {
     // fires at attach/detach, while every committed change goes through
     // onChange — both must mirror into runtime or settings.yaml edits (and
     // card saves) never take effect until restart.
+    //
+    // The `entry` argument IS the settings `base` layer (2026-09-01, bug fix):
+    // an empty object made the browser snapshot's `base` empty, so the card's
+    // "Reset to default" staged an EMPTY text and the field appeared blank
+    // (the official plugins pass their full defaults here — their reset works
+    // because base carries every field). DEFAULTS is the same object the
+    // runtime seeds with, and resolve() folds it under the user layer, so
+    // passing it changes nothing about the resolved values.
     let getSource = () => runtime
-    installSettingsSection(ctx, NS, Config, {}, {
+    installSettingsSection(ctx, NS, Config, DEFAULTS, {
       setSource: (get) => {
         getSource = get
         applySource(get())

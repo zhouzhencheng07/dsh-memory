@@ -108,11 +108,14 @@ let failed = 0;
 const check = (label, ok) => { console.log((ok ? "PASS  " : "FAIL  ") + label); if (!ok) failed++; };
 
 // MemoryCard 的第 5 个 useState 是 open（折叠态，默认 false）——在每次渲染前把
-// 它预置为 true 让字段行参与渲染（折叠时只有 header）。stateSeq 逐渲染递增，
-// 不能用固定索引：open 状态位 = 本次渲染将分配的第 5 个状态（stateSeq + 4）。
+// 它预置为 true 让字段行参与渲染（折叠时只有 header）。
+// stateSeq 每次渲染前归零 + stateStore 跨渲染保留：让 useState 桩按"组件位置"
+// 分配稳定状态身份，等价真实 React 的渲染间状态保留（若不归零，第二次渲染会
+// 拿到全新初始状态，交互路径（如 reset）就无法跨渲染验证）。
 const renderCard = () => {
   callLog = [];
-  stateStore.set(stateSeq + 4, true);
+  stateSeq = 0;
+  stateStore.set(4, true);
   try {
     return MemoryCard({ scope: scopeStub });
   } catch (error) {
@@ -154,6 +157,52 @@ out = renderCard();
 const enText = callLog.map(([, , props]) => props?.children).flat(10).filter((x) => typeof x === "string").join(" ");
 check("切到英文后文案为英文（t() 现读 <html lang>）", enText.includes("Memory library root") && enText.includes("Per-turn memory reminder"));
 sandbox.document.documentElement.lang = "zh-CN";
+
+// --- Reset to default 回填 base 层默认值（2026-09-01 bug 回归防护） ----------
+// 上一版宿主 entry 传了空对象 {}，view.base 为空 → reset 后字段显示空、需重开
+// 设置才恢复。这里用 user 层带覆盖的快照渲染，点 reset 按钮，断言输入框
+// 立即回填 base 默认值（而 tooltip/占位只在 value 为空时出现）。
+const userOverriddenSnapshot = () => ({
+  status: "ready",
+  value: { memoryRoot: "", searchLimit: 3, embeddingBaseUrl: "", embeddingModel: "bge-m3", autoMemory: true, longtermAppend: true },
+  base: { memoryRoot: "", searchLimit: 2, embeddingBaseUrl: "", embeddingModel: "bge-m3", autoMemory: true, longtermAppend: true },
+  user: { searchLimit: 3 },
+  writable: true,
+});
+const prevGet = scopeStub.getSnapshot;
+scopeStub.getSnapshot = userOverriddenSnapshot;
+const resetLog = [];
+const oldPush = callLog.push.bind(callLog);
+// 捕获 reset 按钮的 onClick 并调用它（模拟真实点击）
+let resetOnClick = null;
+callLog = [];
+stateStore.clear();
+stateSeq = 0;
+const clickLog = [];
+const captureJsx = jsxRuntimeStub.jsx;
+jsxRuntimeStub.jsx = (type, props) => {
+  if (type === "button" && props?.className === "dshm-reset" && !resetOnClick) resetOnClick = props.onClick;
+  clickLog.push(["jsx", type, props]);
+  return { type, props };
+};
+jsxRuntimeStub.jsxs = jsxRuntimeStub.jsx;
+out = renderCard();
+check("user 覆盖层存在时渲染出 reset 按钮", resetOnClick !== null);
+if (resetOnClick) resetOnClick();
+// 清掉 reset 前的渲染日志，只保留点击后的重渲染结果
+clickLog.length = 0;
+out = renderCard();
+const limitInputAfterReset = clickLog.filter(([, type, props]) => type === "input" && props?.id === "dsh-memory-searchLimit").map(([, , props]) => props);
+callLog = clickLog;
+check("Reset 后数值字段立即回填 base 默认值（2），无需重开设置", limitInputAfterReset.length > 0 && limitInputAfterReset[0].value === "2");
+// memoryRoot 的 base 默认是空串 → 显示占位符而不是空（2026-09-01）
+const rootInputAfterReset = clickLog.filter(([, type, props]) => type === "input" && props?.id === "dsh-memory-memoryRoot").map(([, , props]) => props);
+check("Reset 后 memoryRoot 空值显示占位默认路径", rootInputAfterReset.length > 0 && rootInputAfterReset[0].value === "" && rootInputAfterReset[0].placeholder === "$DSH_HOME/dsh-memory");
+jsxRuntimeStub.jsx = captureJsx;
+jsxRuntimeStub.jsxs = jsxRuntimeStub.jsx;
+scopeStub.getSnapshot = prevGet;
+stateStore.clear();
+stateSeq = 0;
 
 console.log(failed === 0 ? "ALL RENDER OK" : `${failed} FAIL`);
 process.exit(failed === 0 ? 0 : 1);

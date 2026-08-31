@@ -172,32 +172,33 @@ await check('remember 不存在 → 创建，无 .tmp 残留', async () => {
   assertNoPath(out, 'create')
 })
 
-await check('remember 已存在未读 → 拒绝（createIfAbsent 镜像）', async () => {
+await check('remember 已存在有内容未读 → 拒绝（content 安全规约：非空文件必须用 old_string）', async () => {
   const cwd = 'C:\\write-exists'
   seed(dailyFile(cwd), '# 已有笔记')
   await assert.rejects(
     () => memory.execute({ mode: 'remember', content: 'x' }, makeExec('s5', cwd)),
-    /recall it first/,
+    /already has content/,
   )
 })
 
-await check('recall 后 remember：整文件替换', async () => {
+await check('recall 已存在非空 → content 被拒绝（必须用 old_string）', async () => {
   const cwd = 'C:\\rw'
   seed(dailyFile(cwd), '# 原文')
   await memory.execute({ mode: 'recall' }, makeExec('s6', cwd)) // 记录观察
-  const out = await memory.execute({ mode: 'remember', content: '# 整替换' }, makeExec('s6', cwd))
-  assert.match(out, /· replaced/)
-  assert.equal(readFileSync(dailyFile(cwd), 'utf8'), '# 整替换')
+  await assert.rejects(
+    () => memory.execute({ mode: 'remember', content: '# 整替换' }, makeExec('s6', cwd)),
+    /already has content/,
+  )
 })
 
-await check('recall 后外部直改再 remember：CAS 拒绝', async () => {
+await check('recall 后外部直改再 remember → CAS 拒绝', async () => {
   const cwd = 'C:\\stale-w'
   seed(dailyFile(cwd), '# 原文')
   await memory.execute({ mode: 'recall' }, makeExec('s7', cwd))
   seed(dailyFile(cwd), '# 外部长了很多很多很多行的改动')
   await assert.rejects(
     () => memory.execute({ mode: 'remember', content: 'x' }, makeExec('s7', cwd)),
-    /changed since you read it/,
+    /already has content/,
   )
 })
 
@@ -211,6 +212,15 @@ await check('remember：content 与 old_string 同时给 → 拒绝；都不给 
     () => memory.execute({ mode: 'remember' }, makeExec('s8', cwd)),
     /needs either content/,
   )
+})
+
+await check('空文件可 content 填充（文件存在但为空 = 等 同 absent）', async () => {
+  const cwd = 'C:\\empty-fill'
+  seed(dailyFile(cwd), '') // 空文件
+  await memory.execute({ mode: 'recall' }, makeExec('s8b', cwd))
+  const out = await memory.execute({ mode: 'remember', content: '# 填充空文件' }, makeExec('s8b', cwd))
+  assert.match(out, /· created/)
+  assert.equal(readFileSync(dailyFile(cwd), 'utf8'), '# 填充空文件')
 })
 
 // --- remember + old_string -------------------------------------------------------
@@ -372,8 +382,8 @@ await check('无会话调用：读自由、写仅 create、编辑恒拒（owner 
   assert.match(outCreate, /· created/, '无 owner 时不存在 → createIfAbsent 放行')
   await assert.rejects(
     () => memory.execute({ mode: 'remember', content: 'x' }, makeExec(null, cwd2)),
-    /recall it first/,
-    '无 owner 时已存在 → 拒绝',
+    /already has content/,
+    '无 owner 时已存在有内容 → content 拒绝（文件非空）',
   )
   await assert.rejects(
     () => memory.execute({ mode: 'remember', old_string: '匿名', new_string: 'y' }, makeExec(null, cwd2)),
@@ -382,12 +392,12 @@ await check('无会话调用：读自由、写仅 create、编辑恒拒（owner 
   )
 })
 
-await check('跨会话 CAS：A 读 → B 读后写 → A 编辑被拒', async () => {
+await check('跨会话 CAS：A 读 → B 读后编辑 → A 编辑被拒', async () => {
   const cwd = 'C:\\race'
   seed(dailyFile(cwd), '# 会话竞争\n\n基线')
   await memory.execute({ mode: 'recall' }, makeExec('sA', cwd)) // A 读，记录 present
-  await memory.execute({ mode: 'recall' }, makeExec('sB', cwd)) // B 也要先读，否则 B 的写被 createIfAbsent 拒绝
-  await memory.execute({ mode: 'remember', content: '# 会话竞争\n\nB 会话整替换' }, makeExec('sB', cwd))
+  await memory.execute({ mode: 'recall' }, makeExec('sB', cwd)) // B 也要先读，否则 B 的编辑被 not_observed 拒绝
+  await memory.execute({ mode: 'remember', old_string: '基线', new_string: 'B 会话修改内容' }, makeExec('sB', cwd))
   await assert.rejects(
     () => memory.execute({ mode: 'remember', old_string: '基线', new_string: 'y' }, makeExec('sA', cwd)),
     /changed since you read it/,

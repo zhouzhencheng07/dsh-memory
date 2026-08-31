@@ -428,8 +428,15 @@ function memoryTool(getConfig, getVectorIndex) {
       : editNote(target, args, sessionId)
   }
 
-  /** Create or fully replace: the file's own state decides which
-   * (absent → create; present → replace, guarded by prior read + CAS). */
+  /** Content-only create: writeNote is called ONLY when the file is absent or
+   * empty (the caller — doRemember — gates content vs old_string). A present
+   * non-empty note that slipped through to content is rejected immediately. */
+
+  /** Create a new note, or append if the file is empty (guard opened it as absent
+   * but a file appeared). Present non-empty notes MUST use `old_string` instead
+   * of `content` — `content` on an existing note is rejected to prevent
+   * accidental overwrite of the whole text (2026-09-01, user decision after a
+   * real loss incident). */
   function writeNote(target, content, sessionId) {
     const bytes = Buffer.byteLength(content, 'utf8')
     if (bytes > MAX_WRITE_BYTES) {
@@ -438,6 +445,11 @@ function memoryTool(getConfig, getVectorIndex) {
     const current = statInfo(target.file)
     const seen = prior(sessionId, target.file)
     if (current) {
+      // File exists and has content → content is not allowed
+      if (current.size > 0) {
+        throw new Error(`memory: ${target.label} already has content — use old_string to edit in place, not content (which would overwrite the whole note)`)
+      }
+      // File exists but is empty: treat as absent (allow content to fill it)
       if (!seen || seen.kind === 'absent') {
         throw new Error(`memory: ${target.label} ${seen ? 'appeared since you read it as absent' : 'already exists'} — recall it first`)
       }
@@ -445,7 +457,7 @@ function memoryTool(getConfig, getVectorIndex) {
     }
     atomicWrite(target.file, content)
     record(sessionId, target.file, 'present')
-    return `${target.label} · ${current ? 'replaced' : 'created'} (${bytes} bytes)`
+    return `${target.label} · created (${bytes} bytes)`
   }
 
   /** Edit in place: unique literal replace, guarded by prior read + CAS. */
@@ -478,7 +490,8 @@ function memoryTool(getConfig, getVectorIndex) {
       'Read and maintain the cross-session memory library — reusable experience from earlier sessions (decisions and their reasons, pitfalls and fixes, reusable commands and processes, state changes). ' +
       'Two modes: ' +
       '`recall` gets memory out — `keywords` searches the whole library and returns whole blocks; `date` (default: today) or `topic` opens one note, and `block:"<breadcrumb>"` narrows it to one block. ' +
-      '`remember` puts memory in — `content` creates a note that does not exist yet or fully replaces one you just recalled; `old_string`/`new_string` edits a recalled note in place (read before modify, exactly like the native file tools). ' +
+      '`remember` puts memory in — `content` creates a note that does not exist yet; to revise an existing note use `old_string`/`new_string` to edit in place (read before modify, exactly like the native file tools). ' +
+      '**IMPORTANT safety rule**: once a note has content, `content` is REJECTED — you must use `old_string` to edit in place. `content` on an existing note would overwrite the entire text, which is almost never what you want. ' +
       'Recall rows are addressed by `date` + `workspace` (diary) or `topic` (long term), never by file path: copy them back into `recall` to read a hit in full. Writable notes are today\'s note and `topics/<name>.md`; older diary notes are read-only and retire on their own. ' +
       'What to record: reusable experience only, never play-by-play. ' +
       'Organize under # headings, merge related topics, keep each block concise, and correct outdated statements in place — today\'s note and topic files only; aged diary blocks need no fixing (the window and per-day decay retire them on their own). ' +

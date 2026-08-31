@@ -508,7 +508,7 @@ function memoryTool(getConfig, getVectorIndex) {
       workspace: { type: 'string', description: 'recall: with `date`, which workspace\'s note to read (a distinguishing fragment of the label in the hit row, e.g. "dsh-memory"); default: this workspace' },
       topic: { type: 'string', description: 'The long-term topic file, short kebab-case (e.g. "windows-env"): recall reads it, remember writes it' },
       block: { type: 'string', description: 'recall: read only the block whose heading breadcrumb matches (e.g. "工具链 > pnpm"), copied from a hit row' },
-      content: { type: 'string', description: 'remember: full note text — creates the note when it does not exist, replaces it when you just recalled it' },
+      content: { type: 'string', description: 'remember: full note text — creates the note only when it does not exist yet; once a note has content, content is rejected (use old_string to edit in place instead)' },
       old_string: { type: 'string', description: 'remember: literal text to replace in place; must match exactly and appear once unless replace_all' },
       new_string: { type: 'string', description: 'remember: replacement text for old_string (an empty string deletes the match)' },
       replace_all: { type: 'boolean', description: 'remember: replace every occurrence instead of requiring uniqueness' },

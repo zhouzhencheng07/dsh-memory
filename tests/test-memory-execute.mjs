@@ -39,7 +39,13 @@ function boot(settings) {
   const registered = []
   plugin.apply({
     tools: { register: (tool) => registered.push(tool) },
-    inject: () => {},
+    inject: (deps, cb) => {
+      if (deps?.includes?.('settings')) {
+        cb({ settings: { installSection: (_owner, _ns, _schema, _entry, hooks) => {
+          hooks?.setSource?.(() => globalThis.__MEM_SETTINGS__ ?? {})
+        } } })
+      }
+    },
     effect: () => {},
   })
   const memory = registered.find((t) => t.name === 'memory')

@@ -43,8 +43,17 @@ function boot() {
   let contextReg = null
   apply({
     tools: { register: (tool) => registered.push(tool) },
-    inject: (_deps, cb) => {
-      cb({ systemPrompt: { context: (reg) => { contextReg = reg } } })
+    inject: (deps, cb) => {
+      if (deps.includes('settings')) {
+        // v0.1.2-alpha.5 起的注册入口：ctx.settings.installSection（旧
+        // installSettingsSection 独立导出已移除）。桩镜像真实热重载源：
+        // 测试经 globalThis.__MEM_SETTINGS__ 在 boot 前注入字段值。
+        cb({ settings: { installSection: (_owner, _ns, _schema, _entry, hooks) => {
+          hooks?.setSource?.(() => globalThis.__MEM_SETTINGS__ ?? {})
+        } } })
+      } else {
+        cb({ systemPrompt: { context: (reg) => { contextReg = reg } } })
+      }
       return { dispose() {} }
     },
     effect: (fn) => fn(),

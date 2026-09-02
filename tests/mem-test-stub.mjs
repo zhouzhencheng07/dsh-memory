@@ -1,12 +1,13 @@
 // Universal stub for the @deepseek-ai/* host-side packages that dsh-memory's
 // src imports at module load. Only what index.js / store.js touch:
 //   - schemastery default export `z` (chainable, values ignored)
-//   - dsh-settings: settingsNamespace / installSettingsSection — the section
-//     install mirrors the real hot-reload source: a test sets
-//     globalThis.__MEM_SETTINGS__ before boot to drive the field values
 //   - dsh-tools: defineTool (identity)
 //   - dsh-llm: CallId (identity)
 //   - dsh-home-paths: dshHomePath() -> $MEM_TEST_HOME (test sandbox root)
+// Settings namespace: no longer imported from @deepseek-ai/dsh-settings
+// (v0.1.2-alpha.5 removed installSettingsSection/settingsNamespace); the
+// `settings` service is stubbed on the TEST ctx's inject() — see the boot()
+// helpers in the test files.
 
 const chain = () => {
   const node = {}
@@ -23,11 +24,6 @@ export default {
   object: () => chain(),
 }
 
-export const settingsNamespace = (name) => name
-export const installSettingsSection = (_ctx, _ns, _schema, _opts, handlers) => {
-  const get = () => (globalThis.__MEM_SETTINGS__ ?? {})
-  handlers?.setSource?.(get)
-}
 export const defineTool = (tool) => tool
 export const dshHomePath = () => process.env.MEM_TEST_HOME
 export const CallId = (value) => value

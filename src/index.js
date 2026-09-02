@@ -80,7 +80,6 @@
 import { join } from 'node:path'
 import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import z from '@deepseek-ai/schemastery'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { memoryRoot, resolveDiary, sessionSlug, todayStamp, walkMemory } from './store.js'
 import { findBlock, formatHits, fuseHits, parseKeywords, searchMemory, splitBlocks } from './search.js'
@@ -90,8 +89,10 @@ export const name = 'dsh-memory'
 
 /** Settings namespace of this plugin; its registration is what makes the
  * browser card appear in the Plugins settings section (the card half lives
- * in client/bundle.js and binds ctx.settingsScope to this namespace). */
-const NS = settingsNamespace('dsh-memory')
+ * in client/bundle.js and binds ctx.settingsScope to this namespace).
+ * DSH v0.1.2-alpha.5 起是裸字符串：注册走 ctx.settings.installSection
+ * （见 apply），旧 settingsNamespace() 包装随 installSettingsSection 一起移除。 */
+const NS = 'dsh-memory'
 
 export const inject = ['tools']
 
@@ -529,11 +530,12 @@ function memoryTool(getConfig, getVectorIndex) {
 
 export function apply(ctx) {
   // runtime configuration: seeded with schema defaults, then driven by the
-  // `dsh-memory:` section of settings.yaml (hot-reloaded). installSettingsSection
-  // waits for the settings service itself (ctx.inject); do NOT gate it on
-  // ctx.get('settings') at apply time — the service may mount after this
-  // plugin activates, and a skipped registration makes settings.mutate fail
-  // with "settings namespace ... is not registered".
+  // `dsh-memory:` section of settings.yaml (hot-reloaded). 注册经
+  // ctx.inject(['settings']) 等待 settings 服务就绪（适配 DSH v0.1.2-alpha.5：
+  // 命名空间注册改走 ctx.settings.installSection，旧 installSettingsSection 独立
+  // 导出已移除，不再兼容旧版）——不能拿 ctx.get('settings') 判存在后跳过，服务可能
+  // 在插件激活后才挂载，跳过注册会让浏览器端 settings.mutate 报
+  // "settings namespace ... is not registered"。
   const DEFAULTS = {
     memoryRoot: '',
     searchLimit: 2,
@@ -568,12 +570,18 @@ export function apply(ctx) {
     // runtime seeds with, and resolve() folds it under the user layer, so
     // passing it changes nothing about the resolved values.
     let getSource = () => runtime
-    installSettingsSection(ctx, NS, Config, DEFAULTS, {
-      setSource: (get) => {
-        getSource = get
-        applySource(get())
-      },
-      onChange: () => applySource(getSource()),
+    ctx.inject(['settings'], (settingsCtx) => {
+      try {
+        settingsCtx.settings.installSection(ctx, NS, Config, DEFAULTS, {
+          setSource: (get) => {
+            getSource = get
+            applySource(get())
+          },
+          onChange: () => applySource(getSource()),
+        })
+      } catch (error) {
+        console.warn(`dsh-memory: 设置命名空间注册失败：${error?.message ?? error}`)
+      }
     })
   }
 

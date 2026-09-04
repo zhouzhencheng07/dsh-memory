@@ -19,13 +19,18 @@
 //     composition (see the retrieval bullet).
 //   - ONE tool, TWO modes (2026-09-01, user decision — `memory_search` is
 //     GONE, folded in as `mode:"recall"`): `recall` = search + read (a
-//     single "get memory out" verb), `remember` = create + replace + edit
-//     (a single "put memory in" verb, whose shape the FILE STATE decides —
-//     absent → `content` creates; present → `old_string` edits in place).
-//     The naming follows the semantics: read/write were narrower than what
-//     the modes actually do (read never covered search, write never covered
-//     edit), and `remember` deliberately does not distinguish creating from
-//     revising — "remember this" is one act.
+//     single "get memory out" verb), `remember` = create + edit in place
+//     (a single "put memory in" verb). ONE payload parameter (2026-09-04,
+//     user decision — the separate `content` parameter is GONE, mirroring
+//     the native edit tools): `new_string` is the text to put in — WITHOUT
+//     `old_string` it is the full note text and only lands on an absent or
+//     empty note, WITH `old_string` it edits in place. remember never takes
+//     a `date`: with `topic` it writes topics/<name>.md, without it today's
+//     note; past diary notes are read-only. The naming follows the
+//     semantics: read/write were narrower than what the modes actually do
+//     (read never covered search, write never covered edit), and `remember`
+//     deliberately does not distinguish creating from revising — "remember
+//     this" is one act.
 //   - retrieval (`mode:"recall"` with `keywords`): block-level; POSITIONAL
 //     keyword scoring 2026-08-25 — ONE `keywords` parameter of up to 5
 //     terms, first 3 ×3 then next 2 ×1, partial credit per matched keyword,
@@ -157,9 +162,11 @@ const MAX_TRACKED_SESSIONS = 256
  *                   returns whole blocks; `date`/`topic` (+ optional
  *                   `block`) opens one note. Default (no addressing
  *                   parameter) = today's note for this workspace.
- *   mode:"remember" create / replace / edit: `content` creates an absent
- *                   note or fully replaces a read one; `old_string` edits a
- *                   read one in place.
+ *   mode:"remember" create / edit: `new_string` is the text to put in —
+ *                   without `old_string` it is the full note text and only
+ *                   creates an absent (or empty) note; with `old_string` it
+ *                   edits a read note in place. No `date`: `topic` targets
+ *                   topics/<name>.md, its absence targets today's note.
  *
  * Observation guard, mirroring @deepseek-ai/dsh-fs-observation-policy:
  * per-session records of present {mtimeMs, size} / absent per file. Write on
@@ -365,7 +372,7 @@ function memoryTool(getConfig, getVectorIndex) {
     // above participates: an appended long-term block flips the branch.
     out += hits.some(isLongterm)
       ? '\nLong-term (topics/) blocks above are authoritative (never windowed) — correct outdated statements in their topic file in place, and merge topic files that clearly overlap.'
-      : '\nIf a fact above proved worth keeping long term, file it with memory {mode:"remember", topic:"<name>", content:"…"} — update the matching topic file, or start a new one when none matches.'
+      : '\nIf a fact above proved worth keeping long term, file it with memory {mode:"remember", topic:"<name>", new_string:"…"} — update the matching topic file, or start a new one when none matches.'
     return out
   }
 
@@ -385,8 +392,8 @@ function memoryTool(getConfig, getVectorIndex) {
       // a legacy `memory/<name>` read is offered the topics/ write form:
       // new content belongs in the current layout
       const shape = target.kind === 'topic'
-        ? `memory {mode:"remember", topic:"${String(target.label).replace(/^memory\//, '')}", content:"<full note text>"}`
-        : 'memory {mode:"remember", content:"<full note text>"}'
+        ? `memory {mode:"remember", topic:"${String(target.label).replace(/^memory\//, '')}", new_string:"<full note text>"}`
+        : 'memory {mode:"remember", new_string:"<full note text>"}'
       return `ABSENT — no ${target.label} note exists yet; create it with ${shape}`
     }
     if (info.size > MAX_READ_BYTES) {
@@ -407,56 +414,50 @@ function memoryTool(getConfig, getVectorIndex) {
   }
 
   /**
-   * mode:"remember" — create (content on an absent note), replace (content
-   * on a read note), or edit (old_string on a read note).
+   * mode:"remember" — create (new_string without old_string, landing only on
+   * an absent or empty note) or edit in place (old_string + new_string on a
+   * read note). Addressing is mode-fixed and takes NO date: with `topic` the
+   * write lands in topics/<name>.md, without it in today's note; past diary
+   * notes are read-only (they retire on their own). Rejected — never
+   * silently ignored — so a habit-carried `date` cannot redirect the write.
    */
   function doRemember(args, sessionId, exec) {
-    const hasContent = typeof args?.content === 'string'
-    const hasEdit = typeof args?.old_string === 'string' && args.old_string.length > 0
-    if (hasContent && hasEdit) {
-      throw new Error('memory: pass either content (create/replace) or old_string (edit in place), not both')
-    }
-    if (!hasContent && !hasEdit) {
-      throw new Error('memory: remember needs either content (create/replace) or old_string (edit in place)')
-    }
     if (String(args?.date ?? '').trim()) {
-      throw new Error('memory: diary notes of past days are read-only — only today\'s note and topics/<name>.md can be written')
+      throw new Error('memory: remember takes no date — with topic it writes topics/<name>.md, without it today\'s note; past diary notes are read-only')
     }
+    if (typeof args?.new_string !== 'string') {
+      throw new Error('memory: remember needs new_string — with old_string it edits in place, without old_string it is the full note text of a new note')
+    }
+    const edit = typeof args.old_string === 'string' && args.old_string.length > 0
     const target = resolveTarget(args, exec, { write: true })
     if (!target.ok) throw new Error(target.error)
-    return hasContent
-      ? writeNote(target, String(args.content), sessionId)
-      : editNote(target, args, sessionId)
+    return edit ? editNote(target, args, sessionId) : writeNote(target, args.new_string, sessionId)
   }
 
-  /** Content-only create: writeNote is called ONLY when the file is absent or
-   * empty (the caller — doRemember — gates content vs old_string). A present
-   * non-empty note that slipped through to content is rejected immediately. */
-
-  /** Create a new note, or append if the file is empty (guard opened it as absent
-   * but a file appeared). Present non-empty notes MUST use `old_string` instead
-   * of `content` — `content` on an existing note is rejected to prevent
-   * accidental overwrite of the whole text (2026-09-01, user decision after a
-   * real loss incident). */
-  function writeNote(target, content, sessionId) {
-    const bytes = Buffer.byteLength(content, 'utf8')
+  /** Full-note write: `new_string` without `old_string`. Reached only for an
+   * absent or empty file (the caller — doRemember — routes edit calls to
+   * editNote). A present non-empty note is rejected: a bare `new_string`
+   * would overwrite the whole text (2026-09-01, user decision after a real
+   * loss incident), so it must be edited with `old_string` instead. */
+  function writeNote(target, text, sessionId) {
+    const bytes = Buffer.byteLength(text, 'utf8')
     if (bytes > MAX_WRITE_BYTES) {
-      throw new Error(`memory: content is ${bytes} bytes — the ${MAX_WRITE_BYTES}-byte cap keeps notes curated; split the content across topic files`)
+      throw new Error(`memory: new_string is ${bytes} bytes — the ${MAX_WRITE_BYTES}-byte cap keeps notes curated; split the content across topic files`)
     }
     const current = statInfo(target.file)
     const seen = prior(sessionId, target.file)
     if (current) {
-      // File exists and has content → content is not allowed
+      // File exists and has content → a bare new_string is not allowed
       if (current.size > 0) {
-        throw new Error(`memory: ${target.label} already has content — use old_string to edit in place, not content (which would overwrite the whole note)`)
+        throw new Error(`memory: ${target.label} already has content — edit it in place with old_string; a bare new_string would overwrite the whole note`)
       }
-      // File exists but is empty: treat as absent (allow content to fill it)
+      // File exists but is empty: treat as absent (allow new_string to fill it)
       if (!seen || seen.kind === 'absent') {
         throw new Error(`memory: ${target.label} ${seen ? 'appeared since you read it as absent' : 'already exists'} — recall it first`)
       }
       if (seen.mtimeMs !== current.mtimeMs || seen.size !== current.size) throw new Error(STALE(target.label))
     }
-    atomicWrite(target.file, content)
+    atomicWrite(target.file, text)
     record(sessionId, target.file, 'present')
     return `${target.label} · created (${bytes} bytes)`
   }
@@ -491,9 +492,9 @@ function memoryTool(getConfig, getVectorIndex) {
       'Read and maintain the cross-session memory library — reusable experience from earlier sessions (decisions and their reasons, pitfalls and fixes, reusable commands and processes, state changes). ' +
       'Two modes: ' +
       '`recall` gets memory out — `keywords` searches the whole library and returns whole blocks; `date` (default: today) or `topic` opens one note, and `block:"<breadcrumb>"` narrows it to one block. ' +
-      '`remember` puts memory in — `content` creates a note that does not exist yet; to revise an existing note use `old_string`/`new_string` to edit in place (read before modify, exactly like the native file tools). ' +
-      '**IMPORTANT safety rule**: once a note has content, `content` is REJECTED — you must use `old_string` to edit in place. `content` on an existing note would overwrite the entire text, which is almost never what you want. ' +
-      'Recall rows are addressed by `date` + `workspace` (diary) or `topic` (long term), never by file path: copy them back into `recall` to read a hit in full. Writable notes are today\'s note and `topics/<name>.md`; older diary notes are read-only and retire on their own. ' +
+      '`remember` puts memory in — `new_string` is the text to put in: with `old_string` it replaces that exact text in place (read before modify, exactly like the native file tools); without `old_string` it is the full note text and only creates an absent or empty note. ' +
+      '**IMPORTANT safety rule**: on a note that already has content, a bare `new_string` is REJECTED (it would overwrite the entire text, which is almost never what you want) — edit in place with `old_string`. ' +
+      'Recall rows are addressed by `date` + `workspace` (diary) or `topic` (long term), never by file path: copy them back into `recall` to read a hit in full. `remember` takes no `date` — with `topic` it writes `topics/<name>.md`, without it today\'s note; older diary notes are read-only and retire on their own. ' +
       'What to record: reusable experience only, never play-by-play. ' +
       'Organize under # headings, merge related topics, keep each block concise, and correct outdated statements in place — today\'s note and topic files only; aged diary blocks need no fixing (the window and per-day decay retire them on their own). ' +
       'Topic files hold cross-project evergreen experience (environment/tooling lessons, collaboration preferences, general patterns): one topic per file, update the matching file in place and merge near-duplicates instead of spawning parallel ones.',
@@ -502,16 +503,15 @@ function memoryTool(getConfig, getVectorIndex) {
         type: 'string',
         required: true,
         enum: ['recall', 'remember'],
-        description: '"recall" (search + read) or "remember" (create / replace / edit in place)',
+        description: '"recall" (search + read) or "remember" (create / edit in place)',
       },
       keywords: { type: 'string', description: 'recall: up to 5 space-separated search terms, most essential first — earlier terms weigh more; distinctive (rare) terms beat generic ones' },
-      date: { type: 'string', description: 'recall: which day\'s note to read, YYYY-MM-DD (default: today)' },
+      date: { type: 'string', description: 'recall: which day\'s note to read, YYYY-MM-DD (default: today); remember takes no date (with `topic` it writes the topic file, without it today\'s note)' },
       workspace: { type: 'string', description: 'recall: with `date`, which workspace\'s note to read (a distinguishing fragment of the label in the hit row, e.g. "dsh-memory"); default: this workspace' },
       topic: { type: 'string', description: 'The long-term topic file, short kebab-case (e.g. "windows-env"): recall reads it, remember writes it' },
       block: { type: 'string', description: 'recall: read only the block whose heading breadcrumb matches (e.g. "工具链 > pnpm"), copied from a hit row' },
-      content: { type: 'string', description: 'remember: full note text — creates the note only when it does not exist yet; once a note has content, content is rejected (use old_string to edit in place instead)' },
-      old_string: { type: 'string', description: 'remember: literal text to replace in place; must match exactly and appear once unless replace_all' },
-      new_string: { type: 'string', description: 'remember: replacement text for old_string (an empty string deletes the match)' },
+      old_string: { type: 'string', description: 'remember: literal text to replace in place (omit it to write new_string as the full note text); must match exactly and appear once unless replace_all' },
+      new_string: { type: 'string', description: 'remember: the text to put in — with `old_string`, its replacement (an empty string deletes the match); without `old_string`, the full note text of an absent or empty note (an existing non-empty note is rejected — edit it via old_string)' },
       replace_all: { type: 'boolean', description: 'remember: replace every occurrence instead of requiring uniqueness' },
     },
     output: {

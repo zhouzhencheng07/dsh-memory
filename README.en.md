@@ -30,7 +30,7 @@ shares one package instance.
 | Feature | Description |
 |---|---|
 | **Per-turn reminder (optional)** | A short system-prompt reminder assembled on every request, TIMING ONLY: "when this turn has something worth keeping across sessions, you MUST use the memory tool". Turn it off with `autoMemory: false` for a "record only when asked" style; the `memory` tool stays usable. Usage mechanics and organization rules live entirely in the `memory` tool description |
-| **One tool, two modes (2026-09-01)** | Search and read/write are a single `memory` tool: `mode:"recall"` GETS (`keywords` searches the whole library; `date`/`topic` opens one note; `block` narrows it to one block) and `mode:"remember"` PUTS (`content` creates a note that does not exist or fully replaces one you just recalled; `old_string`/`new_string` edits a recalled note in place). **The shape follows the FILE STATE, not a mode the agent has to pick** — absent ⇒ create with `content`, present ⇒ revise with `old_string`. The names follow the semantics: `recall` covers search + read, `remember` covers create + replace + edit and deliberately does not distinguish creating from revising |
+| **One tool, two modes (2026-09-01; remember surface simplified 2026-09-04)** | Search and read/write are a single `memory` tool: `mode:"recall"` GETS (`keywords` searches the whole library; `date`/`topic` opens one note; `block` narrows it to one block) and `mode:"remember"` PUTS (`new_string` is the text to put in: **without `old_string`** it is the full note text and lands only on an absent or empty file; **with `old_string`** it replaces that exact text in place — recall first). **The presence of `old_string` picks the shape, the FILE STATE keeps guard**: a note that already has content rejects a bare `new_string` (no wholesale overwrites) and must be edited with `old_string`. The names follow the semantics: `recall` covers search + read, `remember` covers create + edit and deliberately does not distinguish creating from revising; **`remember` takes no `date`** — with `topic` it writes `topics/`, without it today's note; older diary notes are read-only |
 | **No file paths in any output (2026-09-01)** | Hit rows and receipts identify notes by ADDRESS: `2026-08-20 · D-Project-x` (diary), `topics/windows-env` (long-term), `today (2026-09-01)`. The model is NEVER told where the library lives on disk, so it cannot bypass this tool with its native read/write/edit — the whole writable surface stays inside the observation guard, and aged diary notes (which retire by decay) cannot be dredged up and hand-edited. **A hit row is also the READ KEY**: feed `date` + `workspace` + `block` back into `recall` to reopen that exact block (the only way in when a long block was truncated) |
 | **Observation guard (mirrors native)** | Per-session present/absent + version records — `remember` refused when the file exists but was not read this session (createIfAbsent), write/edit refused when the file changed since that read (CAS "recall it again"), edit refused when unread (FS_NOT_OBSERVED), old_string refused on multiple matches (FS_AMBIGUOUS_EDIT); atomic tmp+rename writes. **The plugin writes its own data root directly** (trusted node:fs writes; paths are tool-derived or whitelist-validated, the model only supplies content) — bypassing the sandbox fence built into the fs backend (its per-write manual escalation is unusable for automatic capture), so **capture works under every permission mode, workspace-write included** |
 | **Retrieval (`recall` + `keywords`)** | Heading-aware block-level retrieval (any heading splits a block, breadcrumbs included), **single-field positional keyword scoring** (2026-08-25): ONE `keywords` parameter holding up to 5 space-separated terms — the **first 3 at high weight** (×3 each hit), the next 2 at low weight (×1 each) — partial credit per matched keyword, no hard AND gate; a **coverage floor `MIN_COVERAGE=0.3`** (2026-08-29): a block must account for at least 30% of the query's realized evidence — matching 1 of many terms is cut, and wrong/generic keywords never inflate the bar; **IDF term weighting** (2026-08-29): normalized by corpus document frequency — a corpus-unique term keeps its full weight while a term present in EVERY block scales toward 0 (generic words alone can no longer clear `MIN_SCORE=0.5`, the fix for irrelevant hits pulled in by frequent words); absent/everywhere keywords are reported back in the notices; **ASCII word boundaries** (2026-08-29): pure-alphabetic terms match on word boundaries (`log` no longer hits `catalog`), digit/dot-bearing version strings and CJK keep substring semantics; a **minimum-score floor `MIN_SCORE=0.5`**; formatting-tolerant matching, occurrence counts normalized by block length, **per-day decay** (30-day half-life, floor 0.4); snippets return whole blocks (≤1000 chars). The promotion/correction hint is COMPOSITION-DRIVEN and appended to the output (2026-08-29): a long-term block among the hits ⇒ treat as authoritative, fix stale statements in place, merge overlapping topic files; daily-only hits ⇒ file proved-lasting facts into `topics/<topic>.md`; empty results report keyword health only |
@@ -98,9 +98,10 @@ commits).
   subagents (delegationDepth > 0) — its text carries timing only. The single
   two-mode `memory` tool: `recall` runs the search on `keywords` or reads one
   note/block addressed by `date`/`topic` (+`block`) and records the
-  observation; `remember` goes through the createIfAbsent/CAS guard with
-  `content` and publishes atomically (tmp + rename), or validates the
-  observation and unique match with `old_string` before a read-modify-write.
+  observation; `remember` publishes a bare `new_string` (no `old_string`;
+  absent/empty files only, `date` refused) through the createIfAbsent/CAS
+  guard atomically (tmp + rename), or validates the observation and unique
+  match with `old_string` before a read-modify-write.
   The observation guard is keyed per session (mirroring
   `@deepseek-ai/dsh-fs-observation-policy`), and all file work is done by the
   **plugin itself** via node:fs (the sandbox fence lives inside the fs backend
@@ -157,11 +158,12 @@ memory mode="recall" date="2026-08-20" workspace="dsh-memory" block="工具链 >
 
 # read and write a long-term topic file
 memory mode="recall" topic="windows-env"
-memory mode="remember" topic="windows-env" content="# Windows environment lessons ..."
+memory mode="remember" topic="windows-env" new_string="# Windows environment lessons ..."
 memory mode="remember" topic="windows-env" old_string="pnpm dual instance" new_string="pnpm dual instance (avoid via --allow-scripts since 2026-08)"
 
-# today's note: absent -> create with content; just recalled -> revise with old_string
-memory mode="remember" content="# Topic ..."
+# today's note: absent -> create with a bare new_string; just recalled -> revise with old_string
+# (remember takes no date: with topic it writes topics/, without it today's note)
+memory mode="remember" new_string="# Topic ..."
 memory mode="remember" old_string="old sentence" new_string="new sentence"
 ```
 

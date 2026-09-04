@@ -1,10 +1,12 @@
-// memory 两模式工具验证（2026-09-01：recall = 检索 + 读，remember = 新建 + 整替换 + 就地编辑）：
+// memory 两模式工具验证（2026-09-01：recall = 检索 + 读，remember = 新建 + 就地编辑；
+// 2026-09-04：remember 去掉独立 content 参数——new_string 无 old_string = 新建
+// （仅不存在/空文件），带 old_string = 就地编辑；remember 一律拒绝 date）：
 //   1) recall 无寻址参数 = 读今日笔记：不存在返回 ABSENT（无路径、无 topic 清单）且零写盘；
 //      存在返回全文并记录观察；block 参数只读命中块；
 //   2) date + workspace 寻址：读到别的日期/别的 workspace 的日记；非法 date、歧义
 //      workspace、不存在的 workspace 都拒绝；
-//   3) remember + content 镜像原生 createIfAbsent/CAS：未读已存在拒绝、读后整替换、
-//      读后外部改动拒绝；原子写（无 .tmp 残留）；
+//   3) remember 裸 new_string 镜像原生 createIfAbsent/CAS：未读已存在拒绝、空文件
+//      填充、读后外部改动拒绝；原子写（无 .tmp 残留）；
 //   4) remember + old_string 镜像原生 FS_NOT_OBSERVED/唯一匹配：未读拒绝、多处拒绝、
 //      replace_all 放行、找不到拒绝、ABSENT 观察后编辑拒绝（not found）；
 //   5) topic 参数：定位 topics/<topic>.md（可被检索索引）；非法 topic 拒绝；
@@ -171,31 +173,31 @@ await check('recall + workspace：歧义与不存在都拒绝（不静默落到�
   )
 })
 
-// --- remember + content ---------------------------------------------------------
-await check('remember 不存在 → 创建，无 .tmp 残留', async () => {
+// --- remember：裸 new_string（新建/填空文件） -------------------------------------
+await check('remember 不存在 → 裸 new_string 创建，无 .tmp 残留', async () => {
   const cwd = 'C:\\write-create'
-  const out = await memory.execute({ mode: 'remember', content: '# 新笔记\n\n内容' }, makeExec('s4', cwd))
+  const out = await memory.execute({ mode: 'remember', new_string: '# 新笔记\n\n内容' }, makeExec('s4', cwd))
   assert.match(out, /· created/)
   assert.equal(readFileSync(dailyFile(cwd), 'utf8'), '# 新笔记\n\n内容')
   assert.deepEqual(readdirSync(join(dailyFile(cwd), '..')).filter((n) => n.includes('.tmp-')), [], '原子写不残留临时文件')
   assertNoPath(out, 'create')
 })
 
-await check('remember 已存在有内容未读 → 拒绝（content 安全规约：非空文件必须用 old_string）', async () => {
+await check('remember 已存在有内容未读 → 拒绝（安全规约：非空文件必须走 old_string 编辑）', async () => {
   const cwd = 'C:\\write-exists'
   seed(dailyFile(cwd), '# 已有笔记')
   await assert.rejects(
-    () => memory.execute({ mode: 'remember', content: 'x' }, makeExec('s5', cwd)),
+    () => memory.execute({ mode: 'remember', new_string: 'x' }, makeExec('s5', cwd)),
     /already has content/,
   )
 })
 
-await check('recall 已存在非空 → content 被拒绝（必须用 old_string）', async () => {
+await check('recall 已存在非空 → 裸 new_string 被拒绝（必须用 old_string）', async () => {
   const cwd = 'C:\\rw'
   seed(dailyFile(cwd), '# 原文')
   await memory.execute({ mode: 'recall' }, makeExec('s6', cwd)) // 记录观察
   await assert.rejects(
-    () => memory.execute({ mode: 'remember', content: '# 整替换' }, makeExec('s6', cwd)),
+    () => memory.execute({ mode: 'remember', new_string: '# 整替换' }, makeExec('s6', cwd)),
     /already has content/,
   )
 })
@@ -206,28 +208,34 @@ await check('recall 后外部直改再 remember → CAS 拒绝', async () => {
   await memory.execute({ mode: 'recall' }, makeExec('s7', cwd))
   seed(dailyFile(cwd), '# 外部长了很多很多很多行的改动')
   await assert.rejects(
-    () => memory.execute({ mode: 'remember', content: 'x' }, makeExec('s7', cwd)),
+    () => memory.execute({ mode: 'remember', new_string: 'x' }, makeExec('s7', cwd)),
     /already has content/,
   )
 })
 
-await check('remember：content 与 old_string 同时给 → 拒绝；都不给 → 拒绝', async () => {
+await check('remember：new_string + old_string 同给 = 编辑路径（XOR 门随 content 移除）；缺 new_string → 拒绝', async () => {
   const cwd = 'C:\\both'
   await assert.rejects(
-    () => memory.execute({ mode: 'remember', content: 'a', old_string: 'b' }, makeExec('s8', cwd)),
-    /not both/,
+    () => memory.execute({ mode: 'remember', new_string: 'a', old_string: 'b' }, makeExec('s8', cwd)),
+    /editing requires recalling/,
+    '同给两个串不再是参数错误，而是走编辑的未读拒绝',
   )
   await assert.rejects(
     () => memory.execute({ mode: 'remember' }, makeExec('s8', cwd)),
-    /needs either content/,
+    /needs new_string/,
+  )
+  await assert.rejects(
+    () => memory.execute({ mode: 'remember', old_string: 'b' }, makeExec('s8', cwd)),
+    /needs new_string/,
+    '只给 old_string 缺 new_string → 拒绝',
   )
 })
 
-await check('空文件可 content 填充（文件存在但为空 = 等 同 absent）', async () => {
+await check('空文件可裸 new_string 填充（文件存在但为空 = 等同 absent）', async () => {
   const cwd = 'C:\\empty-fill'
   seed(dailyFile(cwd), '') // 空文件
   await memory.execute({ mode: 'recall' }, makeExec('s8b', cwd))
-  const out = await memory.execute({ mode: 'remember', content: '# 填充空文件' }, makeExec('s8b', cwd))
+  const out = await memory.execute({ mode: 'remember', new_string: '# 填充空文件' }, makeExec('s8b', cwd))
   assert.match(out, /· created/)
   assert.equal(readFileSync(dailyFile(cwd), 'utf8'), '# 填充空文件')
 })
@@ -305,7 +313,7 @@ await check('recall 后外部直改再编辑：CAS 拒绝', async () => {
 
 // --- topic 参数 ----------------------------------------------------------------
 await check('topic：定位 topics/<topic>.md 且可被检索索引', async () => {
-  const out = await memory.execute({ mode: 'remember', topic: 'windows-env', content: '# Windows 环境\n\npnpm 双实例教训' }, makeExec('s16'))
+  const out = await memory.execute({ mode: 'remember', topic: 'windows-env', new_string: '# Windows 环境\n\npnpm 双实例教训' }, makeExec('s16'))
   assert.match(out, /· created/)
   assert.match(out, /^topics\/windows-env/, '回执用身份标识')
   const topicFile = join(memoryRoot(), 'topics', 'windows-env.md')
@@ -335,7 +343,7 @@ await check('topic：非法字符（点/空白/反斜杠/多级路径）→ 拒�
 })
 
 await check('topic：中文主题名合法（\\p{L} 放行）', async () => {
-  const out = await memory.execute({ mode: 'remember', topic: '环境坑', content: '# 环境' }, makeExec('s19'))
+  const out = await memory.execute({ mode: 'remember', topic: '环境坑', new_string: '# 环境' }, makeExec('s19'))
   assert.match(out, /· created/)
 })
 
@@ -354,7 +362,7 @@ await check('topic 定向读：遗留 memory/ 目录可寻址（改写仍落 top
   assert.ok(out.includes('旧布局的正文'), `legacy read got:\n${out}`)
   assert.match(out, /^memory\/legacy-topic/)
   // 写面：仍指向 topics/（新内容归当前布局）
-  const created = await memory.execute({ mode: 'remember', topic: 'memory/legacy-topic', content: '# 新' }, makeExec('s20b'))
+  const created = await memory.execute({ mode: 'remember', topic: 'memory/legacy-topic', new_string: '# 新' }, makeExec('s20b'))
   assert.ok(created.startsWith('topics/legacy-topic'), `write lands in topics/, got:\n${created}`)
   assert.ok(existsSync(join(memoryRoot(), 'topics', 'legacy-topic.md')))
 })
@@ -370,10 +378,10 @@ await check('topic 非法目录 → 拒绝（模型只可命名文件，不可�
   )
 })
 
-// --- 旧日记只读 ----------------------------------------------------------------
-await check('remember 写旧日记（date）→ 拒绝（旧日记只读，随衰减退场）', async () => {
+// --- 旧日记只读（remember 不收 date） --------------------------------------------
+await check('remember 带 date → 一律拒绝（有 topic 写 topics/，没有写今日；旧日记只读）', async () => {
   await assert.rejects(
-    () => memory.execute({ mode: 'remember', date: YESTERDAY, content: 'x' }, makeExec('s21')),
+    () => memory.execute({ mode: 'remember', date: YESTERDAY, new_string: 'x' }, makeExec('s21')),
     /read-only/,
   )
   await assert.rejects(
@@ -387,12 +395,12 @@ await check('无会话调用：读自由、写仅 create、编辑恒拒（owner 
   const out = await memory.execute({ mode: 'recall' }, makeExec(null, 'C:\\anon'))
   assert.match(out, /^ABSENT /, '无 owner 读自由（absent 分支）')
   const cwd2 = 'C:\\anon2'
-  const outCreate = await memory.execute({ mode: 'remember', content: '# 匿名' }, makeExec(null, cwd2))
+  const outCreate = await memory.execute({ mode: 'remember', new_string: '# 匿名' }, makeExec(null, cwd2))
   assert.match(outCreate, /· created/, '无 owner 时不存在 → createIfAbsent 放行')
   await assert.rejects(
-    () => memory.execute({ mode: 'remember', content: 'x' }, makeExec(null, cwd2)),
+    () => memory.execute({ mode: 'remember', new_string: 'x' }, makeExec(null, cwd2)),
     /already has content/,
-    '无 owner 时已存在有内容 → content 拒绝（文件非空）',
+    '无 owner 时已存在有内容 → 裸 new_string 拒绝（文件非空）',
   )
   await assert.rejects(
     () => memory.execute({ mode: 'remember', old_string: '匿名', new_string: 'y' }, makeExec(null, cwd2)),
@@ -448,7 +456,7 @@ await check('工具面：单工具、mode 必填枚举、描述含机制与组�
   assert.equal(memory.parameters.mode.required, true, 'mode 必填（镜像原生 str_replace_editor 的 command）')
   assert.deepEqual(
     Object.keys(memory.parameters).sort(),
-    ['block', 'content', 'date', 'keywords', 'mode', 'new_string', 'old_string', 'replace_all', 'topic', 'workspace'],
+    ['block', 'date', 'keywords', 'mode', 'new_string', 'old_string', 'replace_all', 'topic', 'workspace'],
     'recall/remember 合并后的参数面',
   )
 })

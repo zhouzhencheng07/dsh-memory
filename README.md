@@ -13,7 +13,7 @@
 | 能力 | 说明 |
 |---|---|
 | **每轮提醒（可关）** | 短 system-prompt 提醒（英文，对齐官方提示词口径），每次请求重新组装，**只讲时机**："When this turn produced something worth keeping across sessions, you MUST use the \`memory\` tool."；`autoMemory: false` 关闭后走"仅在要求时记录"路线，`memory` 工具照常可用。使用手法与组织规则全部在 `memory` 工具描述里，不占提醒篇幅 |
-| **单工具两模式（2026-09-01）** | 检索与读写合并为一个 `memory` 工具：`mode:"recall"` = **取**（`keywords` 全库块级检索；`date`/`topic` 打开一条笔记；`block` 只读其中一块），`mode:"remember"` = **存**（`content` 新建不存在的笔记或整文件替换刚读过的；`old_string`/`new_string` 就地编辑刚读过的）。**形态由文件状态决定，不是让 agent 先选模式**——不存在用 `content` 建，存在有内容用 `old_string` 改。命名随语义：`recall` 覆盖"检索 + 读"，`remember` 覆盖"新建 + 替换 + 编辑"且不区分新建还是修订 |
+| **单工具两模式（2026-09-01；参数面 2026-09-04 简化）** | 检索与读写合并为一个 `memory` 工具：`mode:"recall"` = **取**（`keywords` 全库块级检索；`date`/`topic` 打开一条笔记；`block` 只读其中一块），`mode:"remember"` = **存**（`new_string` 是要写入的文本：**不带 `old_string`** 就是整篇笔记文本，只落在不存在或空的文件上；**带 `old_string`** 就是把那段文本就地替换——先 recall 再改）。**是否带 `old_string` 决定形态，文件状态把关**：已存在非空的笔记拒绝裸 `new_string`（防整篇覆盖），必须走 `old_string` 编辑。命名随语义：`recall` 覆盖"检索 + 读"，`remember` 覆盖"新建 + 编辑"且不区分新建还是修订；**`remember` 不接受 `date`**——有 `topic` 写 `topics/`，没有写今日笔记，旧日记只读 |
 | **输出不含文件路径（2026-09-01）** | 命中行与读写回执一律用**身份标识**：`2026-08-20 · D-Project-x`（日记）、`topics/windows-env`（长期）、`today (2026-09-01)`。模型**始终不知道记忆库在磁盘的哪里**，因此无法用原生 read/write/edit 绕过本工具去改记忆文件，写入面完整留在观察守卫之内；久远日记更无法被翻出来手改（它们本就靠衰减退场）。**命中行同时就是读取键**：`date` + `workspace` + `block` 原样抄回 `recall` 即可读完整块（长块被截断时这是唯一入口） |
 | **观察守卫（镜像原生）** | 按会话记录 present/absent + 版本——未读已存在时 `remember` 拒绝（createIfAbsent）、读后被改动时写/编辑拒绝（CAS "recall it again"）、编辑未读拒绝（FS_NOT_OBSERVED 同款）、`old_string` 多处匹配拒绝（FS_AMBIGUOUS_EDIT 同款）；tmp+rename 原子写。**插件直写自己的数据根**（node:fs 可信写入，路径由工具派生或白名单校验，模型只提供内容）——绕开 fs backend 内置的沙箱栅栏（其 per-write 人工升级通道对自动捕获不可用），**任何权限模式下（含 workspace-write）捕获均可用** |
 | **检索（`recall` + `keywords`）** | 标题感知块级检索（任意标题切块、带面包屑）、**单字段位置加权关键词**（2026-08-25）：一个 `keywords` 参数最多 5 个空格分隔的词——**前 3 个高权重**（每个命中 ×3）、后 2 个低权重（每个命中 ×1），逐词部分分、无硬 AND 门禁；**覆盖率分数线 `MIN_COVERAGE=0.3`**（2026-08-29）：块须占本次查询实际可用证据的至少 30%，词多只中一个会被掐、错词/泛词不抬高门槛；**IDF 词权重**（2026-08-29）：按全库文档频率归一，**稀有词保持原权重、全库皆有的泛词权重趋零**（泛词独力撑不过 `MIN_SCORE=0.5`，专治高频词拽出无关块），某词全库无命中或人人命中都会在提示里说明；**ASCII 词边界**（2026-08-29）：纯字母词按边界匹配（`log` 不再命中 `catalog`），带数字/点号的版本串与 CJK 保持子串语义；去格式符宽容匹配、命中数按块长归一、**按日衰减**（30 天半衰、下限 0.4）；snippet 返回整个块（≤1000 字符）。**固化/修正指引按结果组成分支附加在输出末尾**：命中长期块 → 以它为准、过时就地修正、重叠主题合并；纯日记命中 → 值得长存的事实经 `remember` 写入 `topics/<topic>.md`；空结果只报关键词健康、不给固化指引 |
@@ -54,7 +54,7 @@ dsh plugin --profile web add "github:zhouzhencheng07/dsh-memory"
 
 ## 工作原理
 
-- `src/index.js`：每轮提醒是 `systemPrompt.context` 贡献（`dsh-memory:auto`，order 200），受 `autoMemory` 与子代理（delegationDepth>0）门控，文本只讲时机。单工具 `memory`：`recall` 按 `keywords` 走检索、按 `date`/`topic`(+`block`) 读一条笔记并记录观察；`remember` 按 `content` 走 createIfAbsent/CAS 守卫后 tmp+rename 原子写，按 `old_string` 先校验观察与唯一匹配再读-改-写。观察守卫按会话记录（镜像 `@deepseek-ai/dsh-fs-observation-policy` 语义），文件操作由**插件自身**以 node:fs 完成（沙箱栅栏位于 fs backend 内部——`dsh-fs-sandbox` 的 `checkedTarget`，原生管线与 `ctx.fs` 直调在 workspace-write 下均拒写 `$DSH_HOME`，工具层唯一放宽通道需逐次人工批准；插件写自己的数据根属宿主可信行为，路径派生/白名单保证写面不越界）。检索输出末尾按结果组成附加固化指引（命中长期块/纯日记两分支）
+- `src/index.js`：每轮提醒是 `systemPrompt.context` 贡献（`dsh-memory:auto`，order 200），受 `autoMemory` 与子代理（delegationDepth>0）门控，文本只讲时机。单工具 `memory`：`recall` 按 `keywords` 走检索、按 `date`/`topic`(+`block`) 读一条笔记并记录观察；`remember` 裸 `new_string`（无 `old_string`）走 createIfAbsent/CAS 守卫后 tmp+rename 原子写（仅不存在/空文件，date 一律拒绝），带 `old_string` 先校验观察与唯一匹配再读-改-写。观察守卫按会话记录（镜像 `@deepseek-ai/dsh-fs-observation-policy` 语义），文件操作由**插件自身**以 node:fs 完成（沙箱栅栏位于 fs backend 内部——`dsh-fs-sandbox` 的 `checkedTarget`，原生管线与 `ctx.fs` 直调在 workspace-write 下均拒写 `$DSH_HOME`，工具层唯一放宽通道需逐次人工批准；插件写自己的数据根属宿主可信行为，路径派生/白名单保证写面不越界）。检索输出末尾按结果组成附加固化指引（命中长期块/纯日记两分支）
 - `src/search.js`：任意标题（`#`–`######`）都是切块边界，子节自成一块并带祖先面包屑；**单字段位置加权关键词**——一个 `keywords` 字符串空格切分后**前 3 个为核心词**（每个命中 ×3）、**后 2 个为辅助词**（每个命中 ×1），首现去重、超限丢弃并在结果里提示；**IDF 词权重**（BM25 式 idf 按语料归一：df=1 的词权重恰为 1，df=N 的词趋零——泛词无法独力过线）、**纯字母 ASCII 词按边界计数**（`log` 不再命中 `catalog`）；逐词部分分、加权命中数按块长度归一；每块分数乘 `max(0.4, 0.5^(days/30))` 按日衰减；**低于 `MIN_SCORE=0.5` 的块不返回**；`rel#面包屑` 精确去重。`hitAddress()` 把 rel 渲染成身份标识（无路径），`findBlock()` 让命中行的面包屑成为跨调用稳定的读取键
 - `src/embed.js`：可选向量路——内存索引 + sha1 签名缓存（文件未变不重复嵌入），余弦 ≥ 0.45 参与融合，RRF k=60；嵌入模型默认 `bge-m3`
 - `src/store.js`：纯函数词汇——路径/slug/日期派生（两种斜杠拼法的 cwd 归一到同一 slug）、记忆根解析（`memoryRoot` 设置项优先，回落 `$DSH_HOME/dsh-memory`）、`walkMemory(windowDays, root)`（硬窗口只作用于**目录名能解析成日期**的子目录，过期日记出窗不删盘；`topics/` 等非日期目录永在索引内）、`resolveDiary()`（日记寻址：日期戳校验 + workspace 标签精确/片段模糊匹配，多匹配报错而非静默落到错的工作区）
@@ -76,11 +76,12 @@ memory mode="recall" date="2026-08-20" workspace="dsh-memory" block="工具链 >
 
 # 读写长期主题文件
 memory mode="recall" topic="windows-env"
-memory mode="remember" topic="windows-env" content="# Windows 环境教训 ..."
+memory mode="remember" topic="windows-env" new_string="# Windows 环境教训 ..."
 memory mode="remember" topic="windows-env" old_string="pnpm 双实例" new_string="pnpm 双实例（2026-08 起用 --allow-scripts 规避）"
 
-# 写今日笔记：不存在 → content 新建；已读过 → old_string 就地改
-memory mode="remember" content="# 主题名 ..."
+# 写今日笔记：不存在 → 裸 new_string 新建；已读过 → old_string 就地改
+# （remember 不接受 date：有 topic 写 topics/，没有写今日笔记）
+memory mode="remember" new_string="# 主题名 ..."
 memory mode="remember" old_string="旧句子" new_string="新句子"
 ```
 

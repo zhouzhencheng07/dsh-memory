@@ -68,7 +68,8 @@ assert.match(out1, new RegExp(`- \\[${dayStamp(0)} · note\\] 今日流水`), `h
 assert.ok(!out1.includes(home.replaceAll('\\', '/')), `output must not leak the library path, got:\n${out1}`)
 assert.ok(!/\.md/.test(out1.split('\n').find((l) => l.startsWith('- [')) ?? ''), 'the row itself must not name a .md file')
 assert.match(out1, /mode:"recall", date:/, 'rows tell the model how to read a hit in full')
-assert.match(out1, /mode:"remember", topic:"<name>"/, 'daily-only hits end with the FILE-NEW promotion hint')
+assert.match(out1, /mode:"remember", topic:"<name>"/, 'hits with recurrence evidence end with the promotion hint')
+assert.match(out1, /needed again/, 'a same-day hit from ANOTHER workspace is recurrence evidence (gate, 2026-09-04)')
 assert.ok(!out1.includes('authoritative'), 'file-new branch excludes the authoritative branch')
 
 const outCap = await memory.execute({ mode: 'recall', keywords: 'alphaunique extra1 extra2 extra3 extra4 extra5 extra6 extra7 extra8' })
@@ -84,6 +85,7 @@ assert.ok(!outOld.includes('mode:"remember"'), 'empty results carry no promotion
 
 const outMid = await memory.execute({ mode: 'recall', keywords: 'betaunique' })
 assert.match(outMid, /十天前/, '10-day-old diary stays inside the window')
+assert.match(outMid, /needed again/, 'a past-day hit is recurrence evidence (gate, 2026-09-04)')
 
 // --- long-term participation: first place is already long-term ------------------
 const outLong = await memory.execute({ mode: 'recall', keywords: 'deltaunique' })
@@ -166,6 +168,36 @@ assert.match(outCustom, /- \[topics\/elsewhere\]/, 'rows stay path-free under a 
 assert.ok(!outCustom.includes('reservetoken'), 'the default root is NOT searched alongside it')
 assert.ok(!outCustom.includes(customRoot.replaceAll('\\', '/')), 'the custom root must not leak either')
 
-console.log('execute-layer checks passed (recall params, notices, window, MIN_SCORE, address output, hit-row read-back, composition-driven long-term hint, store filtering, additive long-term seat, memoryRoot setting)')
+// --- promotion gate (2026-09-04): the nudge only fires on recurrence evidence ----
+// All-today hits from the CALLING session's own workspace are first-time
+// capture: no promotion nudge (the whole point of the gate — premature topic
+// files were filed exactly at that moment).
+const memoryGate = boot({ searchLimit: 5 })
+seed([dayStamp(0)], '--general--.md', '# 今日本 workspace\n\ngatetoken 只出现在今天的本 workspace 日记里。\n')
+const outGate = await memoryGate.execute({ mode: 'recall', keywords: 'gatetoken' })
+assert.match(outGate, /今日本 workspace/, 'the all-today same-workspace hit surfaces')
+assert.ok(!outGate.includes('mode:"remember"'), 'all-today same-workspace hits carry NO promotion nudge')
+assert.ok(!outGate.includes('authoritative'), 'gate case is not the authoritative branch either')
+assert.match(outGate, /mode:"recall", date:/, 'the read hint is unaffected by the gate')
+
+// --- maintenance notice (C, 2026-09-04): one line when a topic file outgrows -----
+const memoryC = boot({ searchLimit: 5 })
+// the oversized file stays a normal hit: the keyword must repeat often
+// enough to clear MIN_SCORE through BM25 length damping
+seed(['topics'], 'big.md', '# 大话题\n\n' + 'bigtoken '.repeat(1890))
+const outBig = await memoryC.execute({ mode: 'recall', keywords: 'bigtoken' })
+assert.match(outBig, /- \[topics\/big\] 大话题/, 'the oversized topic file is still a normal hit')
+assert.match(outBig, /Maintenance note: topics\/big has grown to 17 KB/, `one-line notice naming the address, got:\n${outBig}`)
+assert.equal((outBig.match(/Maintenance note/g) ?? []).length, 1, 'the notice is ONE line')
+assert.ok(!outBig.includes(home.replaceAll('\\', '/')), 'the notice names the address, never a path')
+// a second, larger offender → count + largest; empty results still carry it
+seed(['topics'], 'big2.md', '# 更大\n\n' + 'y'.repeat(19000))
+const outBig2 = await memoryC.execute({ mode: 'recall', keywords: 'deltaunique' })
+assert.match(outBig2, /Maintenance note: 2 topic files are over 16 KB, the largest topics\/big2 at 19 KB/, `got:\n${outBig2}`)
+const outEmptyBig = await memoryC.execute({ mode: 'recall', keywords: 'zilchtoken' })
+assert.ok(outEmptyBig.includes('No memory found.'), 'empty results stay empty of hits')
+assert.match(outEmptyBig, /Maintenance note: 2 topic files/, 'the notice is corpus state, not hit state — it rides empty results too')
+
+console.log('execute-layer checks passed (recall params, notices, window, MIN_SCORE, address output, hit-row read-back, promotion gate, composition-driven long-term hint, store filtering, additive long-term seat, memoryRoot setting, maintenance notice)')
 rmSync(home, { recursive: true, force: true })
 rmSync(customRoot, { recursive: true, force: true })

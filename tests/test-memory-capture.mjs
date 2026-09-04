@@ -16,7 +16,9 @@
 //   7) 每轮提醒 = systemPrompt.context 贡献：文案只讲时机（必须用 memory 工具），
 //      autoMemory 开关 / 子代理 / 无 agent 控制空文本；
 //   8) 工具面：单工具注册、mode 必填枚举、描述承载机制与组织规则（无"必须"）、
-//      参数面完整；任何输出不含记忆库绝对路径。
+//      参数面完整；任何输出不含记忆库绝对路径；
+//   9) 长期收敛 B（2026-09-04）：新建 topic 的标题词与长期语料强重叠 → 拒绝并给
+//      既有地址（去重只挡 topic 创建，日记与编辑路径不查重；弱重叠放行）。
 // 插件侧 node:fs 直写自己的数据根（依据见 src/index.js 头注），不子派发
 // 原生工具，因此测试直接对 MEM_TEST_HOME 沙箱真实读写——任何权限模式下
 // 捕获均可用，不存在"workspace-write 拒写"路径。每个用例独占一个 cwd
@@ -378,6 +380,47 @@ await check('topic 非法目录 → 拒绝（模型只可命名文件，不可�
   )
 })
 
+// --- 写入期 topic 查重（B，2026-09-04） ------------------------------------------
+await check('B 查重：新建 topic 标题词与长期语料强重叠 → 拒绝并给既有地址', async () => {
+  // 先落一个长期主题：标题两个独特词都在同一块里，分数远超 DEDUP_SCORE
+  await memory.execute(
+    { mode: 'remember', topic: 'dedup-base', new_string: '# dedupbase 工具链\n\ndedupbase 专属的教训正文，足够长让块有正文可检。' },
+    makeExec('s23'),
+  )
+  await assert.rejects(
+    () => memory.execute(
+      { mode: 'remember', topic: 'dedup-copy', new_string: '# dedupbase 工具链\n\n另一份重复的教训正文，换个说法再说一遍。' },
+      makeExec('s23'),
+    ),
+    /topics\/dedup-base/,
+    '拒绝消息给出既有 topic 的地址',
+  )
+  await assert.rejects(
+    () => memory.execute(
+      { mode: 'remember', topic: 'dedup-copy-2', new_string: '# dedupbase 工具链\n\n再一份重复内容' },
+      makeExec('s23'),
+    ),
+    /old_string edits/,
+    '拒绝消息指向"recall 后往里并"的出口',
+  )
+})
+
+await check('B 放行：只共享泛词/无标题词不查重；编辑路径与日记路径不查重', async () => {
+  // 标题词完全不在长期语料里 → 无证据 → 放行
+  const ok = await memory.execute(
+    { mode: 'remember', topic: 'dedup-other', new_string: '# 完全无关的新主题词\n\n跟既有长期块没有标题重叠。' },
+    makeExec('s24'),
+  )
+  assert.match(ok, /· created/)
+  // 编辑路径不做查重：dedup-base 已存在，就地编辑直接放行
+  await memory.execute({ mode: 'recall', topic: 'dedup-base' }, makeExec('s25'))
+  const edited = await memory.execute(
+    { mode: 'remember', topic: 'dedup-base', old_string: '教训正文', new_string: '教训正文改' },
+    makeExec('s25'),
+  )
+  assert.match(edited, /edited/, '编辑路径不受查重影响')
+})
+
 // --- 旧日记只读（remember 不收 date） --------------------------------------------
 await check('remember 带 date → 一律拒绝（有 topic 写 topics/，没有写今日；旧日记只读）', async () => {
   await assert.rejects(
@@ -451,7 +494,10 @@ await check('工具面：单工具、mode 必填枚举、描述含机制与组�
   assert.ok(!memory.description.includes('必须'), '工具描述不得出现"必须"')
   assert.ok(/read before modify/i.test(memory.description), '描述含先读后改机制说明')
   assert.ok(/organize under # headings/i.test(memory.description), '组织规则在工具层')
-  assert.ok(/never play-by-play/i.test(memory.description), '内容取舍规则在工具层')
+  assert.ok(/never play-by-play/.test(memory.description), '内容取舍规则在工具层')
+  assert.ok(/needed again/.test(memory.description), '晋升门槛（复现才晋升）在描述里（A，2026-09-04）')
+  assert.ok(/AGENTS\.md/.test(memory.description), 'skip rule 提及工作区自身说明（可推导不记）')
+  assert.ok(/refused when the long-term corpus already covers/.test(memory.description), 'B 查重的拒绝语义在描述里')
   assert.deepEqual(memory.parameters.mode.enum, ['recall', 'remember'], 'mode 是两值枚举')
   assert.equal(memory.parameters.mode.required, true, 'mode 必填（镜像原生 str_replace_editor 的 command）')
   assert.deepEqual(

@@ -61,6 +61,21 @@
 //     is noise that grows without bound and invites browsing by file name
 //     instead of retrieval — the ONLY way to learn that a topic exists is to
 //     have it surface in a recall result.
+//   - long-term GATE + CONVERGENCE + one maintenance signal (2026-09-04,
+//     user decision): promotion into topics/ happens only on RECURRENCE
+//     evidence — the fact is needed again on a later day or in another
+//     workspace, which is exactly when the recall hint fires (all-today
+//     same-workspace results carry no nudge; derivable-from-code/docs
+//     content is not memory material at all). Creating a NEW topic file
+//     first checks the long-term corpus with the note's heading terms and
+//     refuses on a strong overlap — recall the hit and merge into it; the
+//     refusal IS the convergence (constraints fire at the moment evidence
+//     exists, never at the moment a counter crosses a number). Recall
+//     appends a single low-pressure notice when a topic file outgrows
+//     TOPIC_NOTICE_BYTES: topics never decay and block reads load the whole
+//     file, so per-file size is the one mechanically grounded signal —
+//     count/total thresholds were deliberately dropped (topic count tracks
+//     workload, busy ≠ messy; retrieval scores blocks, indifferent to count).
 //   - WHY the tool writes via plain node:fs instead of dispatching the
 //     native tools (2026-08-28, user decision): the sandbox fence lives
 //     INSIDE the fs backend (@deepseek-ai/dsh-fs-sandbox checkedTarget —
@@ -83,11 +98,11 @@
 // fallback node_modules).
 
 import { join } from 'node:path'
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { memoryRoot, resolveDiary, sessionSlug, todayStamp, walkMemory } from './store.js'
-import { findBlock, formatHits, fuseHits, parseKeywords, searchMemory, splitBlocks } from './search.js'
+import { findBlock, formatHits, fuseHits, hitAddress, parseKeywords, searchMemory, splitBlocks, splitHitRel } from './search.js'
 import { EmbeddingClient, VectorIndex } from './embed.js'
 
 export const name = 'dsh-memory'
@@ -153,6 +168,104 @@ const MAX_READ_BYTES = 2 * 1024 * 1024
  * session's observation records (plugin code cannot weakly observe session
  * disposal, so the map needs an explicit bound). */
 const MAX_TRACKED_SESSIONS = 256
+
+/** Maintenance-signal threshold (C, 2026-09-04, user decision): a topics/
+ * file past this size earns ONE low-pressure recall line. Deliberately the
+ * ONLY lifecycle signal — topics never decay and every block read loads the
+ * whole file, so per-file size is mechanically grounded; count/total
+ * thresholds were dropped (topic count tracks workload — busy ≠ messy — and
+ * block-level retrieval is indifferent to how many topic files exist). */
+const TOPIC_NOTICE_BYTES = 16 * 1024
+/** Write-time topic-dedup bar (B, 2026-09-04): the best long-term block must
+ * score at least this on the new note's own heading terms before a create is
+ * refused — roughly two corpus-unique primary terms concentrated in one
+ * existing block. A single shared domain term weighs far less (IDF), so
+ * related-but-distinct topics pass while a renamed duplicate does not. */
+const DEDUP_SCORE = 2
+
+/** Long-term directory names, mirroring walkMemory: anything whose name does
+ * not parse as a date is a long-term directory. Writes always land in
+ * `topics/` (the current layout); reads and the maintenance walk may address
+ * any of them, so pre-rename `memory/` files stay covered. */
+const LONGTERM_DIRS = ['topics', 'memory']
+
+/**
+ * Promotion-gate evidence check (A, 2026-09-04, user decision): a result set
+ * proves "needed again" when any DIARY hit comes from a past day or from
+ * another workspace — today's own-note hits are first-time capture, not
+ * recurrence, and must not earn the promotion nudge (premature topic files
+ * were the failure this gate exists for). Long-term hits never count here:
+ * they take the authoritative branch instead. Both fields (date, workspace
+ * slug) are already part of the hit's rel, so this stays stateless.
+ * @param {Array<{rel: string}>} hits
+ * @param {string} today - YYYY-MM-DD
+ * @param {string} thisSlug - the calling session's diary slug (`--…--`)
+ * @returns {boolean}
+ */
+function hasRecurrenceEvidence(hits, today, thisSlug) {
+  return hits.some((hit) => {
+    const { file } = splitHitRel(hit.rel)
+    const parts = String(file).split('/')
+    if (!Number.isFinite(Date.parse(parts[0]))) return false // long-term
+    const slug = String(parts[1] ?? '').replace(/\.md$/i, '')
+    return parts[0] !== today || slug !== thisSlug
+  })
+}
+
+/**
+ * Heading terms of a new note (B's dedup query, 2026-09-04): heading
+ * breadcrumbs split into word-ish terms in document order, then fed through
+ * parseKeywords so the query mirrors a hand-written one (first 3 essential
+ * ×3, next 2 context ×1, deduped). CJK runs stay whole (no segmentation —
+ * substring matching handles them); single-character terms are dropped as
+ * too weak to be evidence in either direction.
+ * @param {string} text - the full new-note text
+ * @returns {{primary: string[], secondary: string[], notices: string[]}}
+ */
+function headingTerms(text) {
+  const words = []
+  for (const block of splitBlocks(text)) {
+    if (!block.title) continue
+    for (const term of block.title.split(/[^\p{L}\p{N}_-]+/u)) {
+      if (term.length >= 2) words.push(term)
+    }
+  }
+  return parseKeywords(words.join(' '))
+}
+
+/**
+ * The ONE maintenance signal (C, 2026-09-04, user decision): a single
+ * low-pressure recall line when a topics/ file has grown past
+ * TOPIC_NOTICE_BYTES. Names the LARGEST offender by its ADDRESS — the single
+ * exception to the 2026-09-01 no-listing rule, scoped to the trigger.
+ * Walks the long-term directories directly (not the walked corpus), so a
+ * file beyond the 2MB read cap is still reported.
+ * @param {string} root - memory root
+ * @returns {string} '' when healthy (zero output), else one line
+ */
+function maintenanceNotice(root) {
+  const oversized = []
+  for (const dir of LONGTERM_DIRS) {
+    let names = []
+    try {
+      names = readdirSync(join(root, dir))
+    } catch {
+      continue // directory absent → nothing to maintain
+    }
+    for (const name of names) {
+      if (!name.endsWith('.md')) continue
+      const size = statSync(join(root, dir, name), { throwIfNoEntry: false })?.size ?? 0
+      if (size >= TOPIC_NOTICE_BYTES) oversized.push({ name: `${dir}/${name.replace(/\.md$/i, '')}`, size })
+    }
+  }
+  if (oversized.length === 0) return ''
+  oversized.sort((a, b) => b.size - a.size)
+  const [top] = oversized
+  const kb = Math.max(1, Math.round(top.size / 1024))
+  return oversized.length === 1
+    ? `Maintenance note: ${top.name} has grown to ${kb} KB — prune stale blocks or split it whenever convenient (a notice only; nothing is automatic)`
+    : `Maintenance note: ${oversized.length} topic files are over ${Math.round(TOPIC_NOTICE_BYTES / 1024)} KB, the largest ${top.name} at ${kb} KB — prune or split whenever convenient (a notice only; nothing is automatic)`
+}
 
 /**
  * The one `memory` tool (2026-09-01, user decision — replaces the
@@ -221,11 +334,6 @@ function memoryTool(getConfig, getVectorIndex) {
   }
 
   const TOPIC_RE = /^[\p{L}\p{N}_-]+$/u
-  /** Long-term directory names, mirroring walkMemory: anything whose name
-   * does not parse as a date is a long-term directory. A write always lands
-   * in `topics/` (the current layout); a read may address any of them, so
-   * pre-rename `memory/` files stay readable. */
-  const LONGTERM_DIRS = ['topics', 'memory']
 
   /**
    * Split a `topic` argument into its long-term directory and file name.
@@ -307,7 +415,7 @@ function memoryTool(getConfig, getVectorIndex) {
   function doRecall(args, sessionId, exec) {
     const keywords = String(args?.keywords ?? '').trim()
     if (args?.keywords != null && keywords === '') throw new Error('memory: no usable keywords')
-    if (keywords) return recallSearch(keywords)
+    if (keywords) return recallSearch(keywords, exec)
     const target = resolveTarget(args, exec)
     if (!target.ok) throw new Error(target.error)
     return readNote(target, String(args?.block ?? '').trim(), sessionId)
@@ -315,9 +423,10 @@ function memoryTool(getConfig, getVectorIndex) {
 
   /**
    * Block-level keyword search over the whole corpus, with the
-   * composition-driven long-term guidance appended (2026-08-29).
+   * composition-driven long-term guidance appended (2026-08-29) under the
+   * promotion gate (2026-09-04), and the single maintenance notice (C).
    */
-  async function recallSearch(keywords) {
+  async function recallSearch(keywords, exec) {
     const kw = parseKeywords(keywords)
     if (kw.primary.length === 0 && kw.secondary.length === 0) throw new Error('memory: no usable keywords')
     // Result count is locked to the configured searchLimit (user decision
@@ -362,7 +471,11 @@ function memoryTool(getConfig, getVectorIndex) {
     // matched nothing / matched everything, so the next call rewords
     const allNotices = [...kw.notices, ...stats]
     if (allNotices.length > 0) out = `${allNotices.join('; ')}\n${out}`
-    if (hits.length === 0) return out
+    // The single maintenance line (C, 2026-09-04): corpus state, not hit
+    // state — it rides both the empty and the hit paths, one line at most.
+    const maintenance = maintenanceNotice(root())
+    const finish = (text) => (maintenance ? `${text}\n${maintenance}` : text)
+    if (hits.length === 0) return finish(out)
     // how to read a hit further: date + workspace + block, or topic + block
     out += '\nRead one in full with memory {mode:"recall", date:"<date>", workspace:"<workspace>"} (or topic:"<name>"), optionally block:"<breadcrumb>".'
     // Long-term guidance is COMPOSITION-DRIVEN (2026-08-29, user decision):
@@ -370,10 +483,17 @@ function memoryTool(getConfig, getVectorIndex) {
     // itself decides which hint the model sees, instead of the agent
     // pre-judging at capture time (被搜到才说明值得长存). The append seat
     // above participates: an appended long-term block flips the branch.
-    out += hits.some(isLongterm)
-      ? '\nLong-term (topics/) blocks above are authoritative (never windowed) — correct outdated statements in their topic file in place, and merge topic files that clearly overlap.'
-      : '\nIf a fact above proved worth keeping long term, file it with memory {mode:"remember", topic:"<name>", new_string:"…"} — update the matching topic file, or start a new one when none matches.'
-    return out
+    // Under it sits the promotion GATE (2026-09-04): the file-it nudge
+    // appears ONLY when the results themselves carry recurrence evidence —
+    // a diary hit from a past day or another workspace. All-today's-own-note
+    // results are first capture; nudging promotion there is exactly how
+    // premature topic files used to happen.
+    if (hits.some(isLongterm)) {
+      out += '\nLong-term (topics/) blocks above are authoritative (never windowed) — correct outdated statements in their topic file in place, and merge topic files that clearly overlap.'
+    } else if (hasRecurrenceEvidence(hits, todayStamp(), sessionSlug(exec?.agent?.session?.header?.cwd))) {
+      out += '\nA hit above was needed again (past date or another workspace) — long-term material belongs in a topic file: memory {mode:"remember", topic:"<name>", new_string:"…"} — update the matching topic file; start a new one only when none matches.'
+    }
+    return finish(out)
   }
 
   /** Heading breadcrumbs of a note, for the "no such block" message. */
@@ -431,7 +551,38 @@ function memoryTool(getConfig, getVectorIndex) {
     const edit = typeof args.old_string === 'string' && args.old_string.length > 0
     const target = resolveTarget(args, exec, { write: true })
     if (!target.ok) throw new Error(target.error)
+    // Write-time topic dedup (2026-09-04): only the CREATE path of a topic
+    // file, and only when the create would actually proceed — a present
+    // non-empty file is refused by writeNote's overwrite guard, which keeps
+    // precedence over the dedup refusal.
+    if (!edit && target.kind === 'topic') {
+      const current = statInfo(target.file)
+      if (!current || current.size === 0) {
+        const clash = topicClash(target, args.new_string)
+        if (clash) throw new Error(clash)
+      }
+    }
     return edit ? editNote(target, args, sessionId) : writeNote(target, args.new_string, sessionId)
+  }
+
+  /** Write-time topic dedup (B, 2026-09-04, user decision): convergence
+   * happens at the moment duplication ACTUALLY happens, instead of a count
+   * threshold nagging later. Before creating a NEW topic file, query the
+   * long-term corpus with the new note's own heading terms; a strong overlap
+   * means the topic already exists — refuse with its address so the content
+   * merges into it. The refusal is the convergence: edit-in-place is the
+   * escape hatch that lands the content where it belongs, and a genuinely
+   * separate topic can still be created once its headings are clearly
+   * distinct from the hit. Diary writes are never deduped (staging layer).
+   * @returns {string} refusal message, or '' when clear to create
+   */
+  function topicClash(target, text) {
+    const terms = headingTerms(text)
+    if (terms.primary.length === 0 && terms.secondary.length === 0) return ''
+    const corpus = walkMemory(0, root()).filter((entry) => isLongtermRel(entry.rel))
+    const [top] = searchMemory(corpus, terms.primary, terms.secondary, 1)
+    if (!top || top.score < DEDUP_SCORE) return ''
+    return `memory: creating topic "${target.label}" — the long-term corpus already covers these headings (${hitAddress(top.rel)}, top score ${Number(top.score.toFixed(2))}). Recall it and merge this content in with old_string edits; only a genuinely separate topic — headings clearly distinct from the hit after recalling — becomes a new file`
   }
 
   /** Full-note write: `new_string` without `old_string`. Reached only for an
@@ -495,9 +646,10 @@ function memoryTool(getConfig, getVectorIndex) {
       '`remember` puts memory in — `new_string` is the text to put in: with `old_string` it replaces that exact text in place (read before modify, exactly like the native file tools); without `old_string` it is the full note text and only creates an absent or empty note. ' +
       '**IMPORTANT safety rule**: on a note that already has content, a bare `new_string` is REJECTED (it would overwrite the entire text, which is almost never what you want) — edit in place with `old_string`. ' +
       'Recall rows are addressed by `date` + `workspace` (diary) or `topic` (long term), never by file path: copy them back into `recall` to read a hit in full. `remember` takes no `date` — with `topic` it writes `topics/<name>.md`, without it today\'s note; older diary notes are read-only and retire on their own. ' +
-      'What to record: reusable experience only, never play-by-play. ' +
+      'What to record: reusable experience only, never play-by-play — and skip anything the code, docs, or the workspace\'s own instructions (AGENTS.md) already answer; check there first. ' +
+      'Promotion gate: new long-term material starts in today\'s note; move it into `topics/` only when it is needed again — a later day or another workspace, which is exactly when the recall hint fires — except narrow always-true facts (user preferences, environment constants), which may go straight to a topic file. ' +
       'Organize under # headings, merge related topics, keep each block concise, and correct outdated statements in place — today\'s note and topic files only; aged diary blocks need no fixing (the window and per-day decay retire them on their own). ' +
-      'Topic files hold cross-project evergreen experience (environment/tooling lessons, collaboration preferences, general patterns): one topic per file, update the matching file in place and merge near-duplicates instead of spawning parallel ones.',
+      'Topic files hold cross-project evergreen experience (environment/tooling lessons, collaboration preferences, general patterns): one topic per file, update the matching file in place and merge near-duplicates instead of spawning parallel ones — creating a new topic file is refused when the long-term corpus already covers its headings, so recall the hit and merge into it instead.',
     parameters: {
       mode: {
         type: 'string',
